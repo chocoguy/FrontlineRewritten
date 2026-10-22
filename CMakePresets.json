@@ -1,0 +1,25 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": { "major": 3, "minor": 31, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "xcode",
+      "displayName": "Xcode project",
+      "description": "Generates build/xcode/FrontlineRewritten.xcodeproj for day-to-day work",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/xcode"
+    },
+    {
+      "name": "ninja",
+      "displayName": "Ninja (Debug)",
+      "description": "Command-line build used by tools/build_report.py",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/ninja",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" },
+    { "name": "ninja", "configurePreset": "ninja" }
+  ]
+}

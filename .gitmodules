@@ -1,0 +1,3 @@
+[submodule "FrontlineDecompiled"]
+	path = FrontlineDecompiled
+	url = https://github.com/chocoguy/FrontlineDecompiled.git

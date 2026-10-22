@@ -1,0 +1,39 @@
+# Build output (CMake presets write to build/xcode and build/ninja)
+/build/
+
+# Game data: never commit it. The disc belongs in the submodule's ignored
+# FrontlineDecompiled/orig/ folder; these catch a copy that lands anywhere else.
+/orig/
+*.iso
+*.gcm
+*.rvz
+*.ciso
+*.wbfs
+*.nkit.*
+*.dol
+*.elf
+# File types on the GMFE69 disc
+*.abk
+*.ast
+*.asf
+*.bnr
+*.bum
+*.emt
+*.gfn
+*.gsh
+*.mpc
+*.mpf
+*.mus
+*.viv
+# Data the GameCube build extracts from the DOL
+*.inc
+
+# Local Claude Code settings
+.claude/settings.local.json
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
