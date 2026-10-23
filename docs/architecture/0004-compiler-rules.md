@@ -39,3 +39,22 @@
 ## How the native build finds headers
 
 The decomp's `include/` folder has its own minimal C library headers (`string.h`, `math.h`, `stdio.h`, …). The native build adds that folder with `-idirafter`, so Apple's C library headers win and the game's own headers (`game/`, `ea/`, `dolphin/`, …) are still found. Where the game relies on a CodeWarrior C library function Apple doesn't have (`stricmp`, `__sys_alloc`, …), the platform layer provides it.
+
+## Revisions from Phase 1
+
+**Warnings.** The game is built with `-Wno-everything`, plus these promoted to errors because they're always 64-bit or ABI bugs natively:
+- `int-to-pointer-cast` and `pointer-to-int-cast`
+- `int-conversion` and `incompatible-pointer-types`
+- `implicit-function-declaration` and `return-type`
+
+**Missing return values.** CodeWarrior let `int` functions return nothing; the game never uses those values. `RETURN_NOTHING` and `END_RETURN_NOTHING` from `types.h` return 0 natively and expand to the original code on GameCube.
+
+**MSL compatibility.** `platform/include/msl_compat.h` is force-included. It declares `stricmp`, maps MSL's `_FILE`, and renames EA's `random()` to `EA_random` (it clashes with libc's).
+
+**CodeWarrior's own `rand()` and `qsort()`.** The game's random sequences and sort orders depend on them: MSL's `qsort` is a heap sort, so equal keys land in a different order than with Apple's. `tools/gen_sources.py` compiles those two MSL units natively, and `msl_compat.h` renames them `MSL_rand`, `MSL_srand` and `MSL_qsort`. They're portable C, and the random sequence comes out identical: only the low 32 bits of MSL's 64-bit `unsigned long` state feed the result.
+
+The math functions still come from Apple's libm. MSL's are fdlibm, also portable C, and can be compiled the same way if lockstep multiplayer needs bit-identical results across machines.
+
+**Other build settings:**
+- `-fno-sized-deallocation`: the game replaces only the unsized `operator delete`.
+- **Callback types:** callbacks passed to SDK functions take `u32`/`s32`, not `unsigned long`/`long`. These are the same types on GameCube, but they differ natively, and a pointer passed as `unsigned long` would silently keep 64 bits.

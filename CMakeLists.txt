@@ -23,7 +23,11 @@ if(NOT EXISTS "${FRONTLINE_DECOMP_DIR}/configure.py")
         "No decomp at ${FRONTLINE_DECOMP_DIR}. Run: git submodule update --init")
 endif()
 
+add_subdirectory(platform)
 add_subdirectory(game)
+add_subdirectory(tests/datacheck)
+add_subdirectory(tests/ostest)
+add_subdirectory(apps/headless)
 
 if(FRONTLINE_BUILD_APP)
     enable_language(Swift)

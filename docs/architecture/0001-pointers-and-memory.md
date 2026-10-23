@@ -1,6 +1,6 @@
 # 0001: Pointers and memory
 
-**Status:** accepted (Phase 0, 2026-10-21) · **Covers:** ROADMAP gotcha 1
+**Status:** accepted (Phase 0, 2026-10-21); revised in Phase 1 (see the end) · **Covers:** ROADMAP gotcha 1
 
 ## Problem
 
@@ -63,3 +63,25 @@ A few reads go straight to the GameCube's low-memory OS globals: `OS_BUS_CLOCK`/
 - Phase 1's portability pass has a mechanical rule for each error bucket.
 - `ptr32<T>` costs an add on every dereference. That only applies to data read from files, and it's cheap.
 - An arena snapshot is a single `memcpy`. That makes rollback (Phase 5) and save states practical.
+
+## Revisions from Phase 1
+
+The plan above held up. Implementing it changed four details:
+
+- **32-bit values are GameCube-style addresses, not plain arena offsets.**
+  - `[0x10000, arena size)` is the arena.
+  - `[0x80000000, …)` is the executable image (statics, string literals, functions), like the real console's address map.
+  - So `(u32)ptr` round-trips for heap and static data alike, and alignment tests still work.
+  - The helpers are `PTR_TO_ADDR(p)` and `ADDR_TO_PTR(T, a)` (plain casts on GameCube), plus `PTR32_RAW(f)` for a field's stored value. They're in `types.h` and `native/address.h`, and implemented in `platform/src/address.cpp`.
+- **Sometimes the slot is widened instead.** A runtime struct's 32-bit slot that only ever holds a pointer becomes `uptr` (still `unsigned long` on GameCube). Example: the draw context's fog pointer, which points at a stack object.
+- **Objects built inside file data get native side objects.** Some loaders construct C++ objects with vtables over file records: compartment and static-mesh materials, and skinned-mesh parts. Natively those objects are bigger than the records, so the native loader builds them separately from the record fields and points the file's references at them.
+- **The game's `operator new`/`delete` stay inside the game.** They're unexported at link time, so Apple's frameworks keep the system allocator. Non-game threads get `calloc`/`free`.
+- **Every 32-bit value round-trips, not just addresses.** The game also passes plain numbers where a pointer goes: a float's bits as script event data, an ARAM address as a `void*`. So the arena sits at the bottom of a reserved 4 GB window, and any value outside the image maps into the rest of the window. `ADDR_TO_PTR` then `PTR_TO_ADDR` gives back any value; dereferencing one outside the arena faults. A real pointer outside the window and the image (a stack address, a host allocation) still traps when converted. The other direction holds too: a pointer-typed value below 4 GB (an integer the game put in a `void*`, such as event data 1) converts to its own value, since macOS maps nothing there.
+- **Runtime structs with GameCube-sized allocations get one of two fixes.** Some code allocates or clears a struct with a literal size (`SNDMEMI_allocz(0x3C)`), or embeds one in a fixed-size header.
+  - If the struct is only used at run time, the literal becomes `GC_SIZE(0x3C, sizeof(RSFSTATE))` from `types.h`: the literal on GameCube, the native expression natively.
+  - If the layout itself is fixed (sizes come from tables, or headers sit at fixed offsets: the AEMS sound runtime, EA's pool allocators, the sound memory header), its pointer fields become `PTR32` so the GameCube layout holds natively.
+  - `tools/build_report.py --sizes` lists every struct whose `SIZE_ASSERT` fails natively, as the list to check.
+- **Raw offsets into objects become field accesses.** For example `*(BSObject**)((u8*)this + 0x250)` becomes `m_pScriptObject`. The GameCube code is unchanged (`regress.py`), and natively the offsets follow the 8-byte vtable pointers and pointer fields.
+- **Data viewed with a GameCube object layout is copied.** Location collision boxes and a static mesh's root node are `CVolBox` images in file data, with a 4-byte vtable slot. Natively, `GCVolBox()` in `box.h` builds a real `CVolBox` from those bytes.
+- **Console-sized space that holds native objects is sized natively.** Objects are placement-built into byte arrays sized for the console (a mesh in a 16-byte template slot), at fixed offsets inside other objects (a soldier's AI filter at `+0x44B0`), or in pools whose element sizes are literals. Natively the buffer, offset or pool size becomes `sizeof` the real object (`GC_SIZE`, or an `#ifdef` with the size), and the slot that holds both grows to fit.
+- **MWCC can put a class's vtable pointer after data members.** `BSGO_Basic`'s is at `0xC`, after its three members; clang always puts it first. Code that reads "the first word of the object" (`BSGO_Basic`'s script object) gets a native accessor.

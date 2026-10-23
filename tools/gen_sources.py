@@ -19,6 +19,14 @@ from pathlib import Path
 # platform layer replaces.
 NATIVE_LIBS = ["Game", "Movie", "EA System", "EA Sound"]
 
+# CodeWarrior C library (MSL) units the native build compiles too, where the
+# game depends on their exact behavior. msl_compat.h renames them (MSL_rand, ...)
+# so they don't clash with Apple's.
+MSL_UNITS = {
+    "MSL_C.PPCEABI.bare.H/rand.c": "the original random sequence",
+    "MSL_C.PPCEABI.bare.H/qsort.c": "a heap sort: equal keys end up in the original order",
+}
+
 # Units in those libraries that the port doesn't compile, and why.
 EXCLUDED = {
     "game/loadelf.cpp": "boot loader: loads the game ELF from disc",
@@ -66,6 +74,12 @@ def main() -> None:
             sources.append(unit)
             if cxx and unit.endswith(".c"):
                 as_cxx.append(unit)
+
+    all_units = {u for lib in libs.values() for u, _ in lib}
+    for unit in MSL_UNITS:
+        if unit not in all_units:
+            sys.exit(f"gen_sources.py compiles an MSL unit configure.py doesn't list: {unit}")
+        sources.append(unit)
 
     stale = sorted(set(EXCLUDED) - set(excluded))
     if stale:

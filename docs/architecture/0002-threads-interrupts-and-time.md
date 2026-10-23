@@ -51,6 +51,18 @@ On a multi-core Mac, real threads running freely would turn all of this into dat
 - **Hand-rolled fibers on a single host thread (`ucontext`).** Just as deterministic, but `makecontext` is deprecated on macOS, debuggers and sanitizers can't see the fiber stacks, and a blocking host call freezes everything.
 - **Making EA's systems thread-safe.** A huge rewrite that drifts away from the shared source.
 
+## Revisions from Phase 1
+
+Implemented in `platform/src/os/` as planned, with these details:
+- **Native thread state lives in the `OSThread`'s register context**, which nothing uses natively. The scheduler never allocates: on game threads, `operator new` belongs to the game.
+- **Game threads run on host stacks carved from the arena** (2 MB each, a 32 MB pool at its top). Pointers to locals then have 32-bit addresses, which the game stores (event data, message queues). The game's own 4–8 KB stack buffers go unused.
+- **The OS structs keep their console sizes.** EA's mutex is an `OSMutex` in a 28-byte buffer, so the pointers in `OSThread`, `OSMutex`, `OSMessageQueue` and the thread queues are `PTR32` natively.
+- **Static initializers run on the default thread.** The game's run on the host's main thread before `main()`, and they allocate. The first OS call adopts that thread as the console's default thread, and `frontline::StartGame` then moves it to a host thread of its own.
+- **When every thread waits, the last one to block idles.** It waits for an interrupt and delivers it (handlers run with no current thread, as on the console), until a thread is ready.
+- **Spin-waits use `SPIN_WAIT()`** (`types.h`): it sleeps until an interrupt is raised and delivers it, keeping the baton as the spinning CPU would. Found so far: `CScreen::Wait`, `FILESYS_waitop`, the one-shot sound bank wait, the animation DMA wait.
+- **Retraces, alarms, disc reads and audio frames each have a host thread** that only raises interrupts.
+- `tests/ostest` checks the scheduler: priorities, preemption, blocking queues, mutex priority inheritance, alarms while idle, and delivery held back while interrupts are disabled. It's clean under the Thread Sanitizer.
+
 ## Consequences
 
 - Scheduling is deterministic: the same inputs give the same thread interleaving. Input replays and lockstep (Phase 5) depend on that.

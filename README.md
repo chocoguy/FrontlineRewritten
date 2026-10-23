@@ -7,10 +7,12 @@ This repository contains **no game data**. You need your own copy of the game (U
 
 ## Status
 
-**Phase 0 (groundwork) is done.**
-- The native build compiles the game code and turns the errors into a work list: [docs/port/build-errors.md](docs/port/build-errors.md).
-- The macOS app shell builds and opens a Metal window.
-- The game doesn't run yet; that's Phase 1.
+**Phase 0 (groundwork) is done; Phase 1 is in progress.**
+- The game links and boots natively from your disc: it loads its data, starts its threads, and runs its frame loop at 59.94 Hz up to the "Press Start" screen.
+- Nothing is drawn yet: the GX → Metal renderer is next. Sound runs silently, and there are no memory cards yet.
+- The data checker validates the converted loaders against your disc (12 big-endian formats).
+- Details: [docs/port/phase1-status.md](docs/port/phase1-status.md).
+- The GameCube build stays unchanged.
 
 ## Requirements
 
@@ -42,13 +44,34 @@ open build/xcode/FrontlineRewritten.xcodeproj
 
 Run the `FrontlineMac` scheme. To build from the command line instead, use `cmake --build --preset xcode --target FrontlineMac`.
 
+**Data check:** loads the converted file formats from your disc through the native loaders and validates them:
+
+```sh
+cmake --build --preset ninja --target frontline_datacheck
+build/ninja/tests/datacheck/frontline_datacheck FrontlineDecompiled/orig/GMFE69/disc
+```
+
+**Headless run:** boots the game with no window or sound for a number of seconds (a smoke test), optionally saving the displayed frame each second:
+
+```sh
+cmake --build --preset ninja --target frontline_headless
+build/ninja/apps/headless/frontline_headless FrontlineDecompiled/orig/GMFE69/disc 10
+```
+
+**OS test:** checks the platform's threads, interrupts, alarms and heaps against the console's rules:
+
+```sh
+cmake --build --preset ninja --target frontline_ostest
+build/ninja/tests/ostest/frontline_ostest
+```
+
 **Native build report:** compiles the game code, collects every error and rewrites `docs/port/build-errors.md`:
 
 ```sh
 python3 tools/build_report.py
 ```
 
-The game library (`frontline_game`) is left out of the default build until it compiles. Build it on its own with `--target frontline_game`.
+Add `--sizes` to list the structs whose native layout differs from the GameCube's.
 
 ## Editing the game code
 
@@ -65,7 +88,10 @@ The game code lives only in the `FrontlineDecompiled` submodule, and the GameCub
 |---|---|
 | `FrontlineDecompiled/` | Submodule: the decompiled game, the only copy of the game code |
 | `game/` | CMake target that compiles the decomp's Game, Movie, EA System and EA Sound units with clang |
+| `platform/` | The GameCube system libraries, natively: OS, DVD, VI, PAD, CARD, audio, GX |
 | `apps/macos/` | SwiftUI + Metal app shell |
+| `apps/headless/` | The game without a window, for smoke tests |
+| `tests/` | `datacheck` (file formats on your disc), `ostest` (the OS layer) |
 | `tools/` | `gen_sources.py` (unit list from the decomp), `build_report.py` (error work list) |
 | `docs/architecture/` | Decisions on pointers, threads, byte order and compiler rules |
 | `docs/port/` | Generated reports |

@@ -42,6 +42,10 @@ Effort is relative: S, M, L, XL.
   - Decisions: [docs/architecture/](docs/architecture/README.md).
 
 ### Phase 1 — MVP: macOS with Metal (XL, the critical path)
+- **Status: in progress.**
+  - Every game unit compiles natively, and the GameCube build is unchanged.
+  - Collision, level geometry and mesh loaders are verified against the disc.
+  - Next: the platform layer. See [docs/port/phase1-status.md](docs/port/phase1-status.md).
 1. **Portability pass:**
    - per-platform integer types
    - pointer casts → `uintptr_t`

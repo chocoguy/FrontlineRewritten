@@ -51,6 +51,7 @@ target_compile_definitions(frontline_game PRIVATE
 # real C library wins and the game's own headers (game/, ea/, dolphin/, ...)
 # are still found.
 target_compile_options(frontline_game PRIVATE
+    "SHELL:-include ${PROJECT_SOURCE_DIR}/platform/include/msl_compat.h"
     "SHELL:-idirafter ${_decomp}/include"
     "SHELL:-idirafter ${_extracted}"
     # See docs/architecture/0004-compiler-rules.md.
@@ -58,7 +59,33 @@ target_compile_options(frontline_game PRIVATE
     -fwrapv
     -ffp-contract=off
     -fsigned-char
+    # The game replaces operator new/delete (game/memory.cpp) but not the sized
+    # delete, so every delete must go through the unsized one.
+    -fno-sized-deallocation
     -ferror-limit=0
-    -w)
+    # Old code: silence warnings, except ones that are always 64-bit bugs.
+    # (-w would silence those too, even when promoted to errors.)
+    -Wno-everything
+    -Werror=int-to-pointer-cast
+    -Werror=pointer-to-int-cast
+    -Werror=int-conversion
+    -Werror=incompatible-pointer-types
+    -Werror=implicit-function-declaration
+    -Werror=return-type)
 
 source_group(TREE "${_decomp}/src" PREFIX "src" FILES ${FRONTLINE_GAME_SOURCES})
+
+# The game replaces the global operator new/delete (game/memory.cpp). Keep
+# those inside the executable: exported, dyld would hand them to every
+# framework in the process too.
+target_link_options(frontline_game INTERFACE
+    "LINKER:-unexported_symbol,__Znwm"
+    "LINKER:-unexported_symbol,__Znam"
+    "LINKER:-unexported_symbol,__ZnamPc"
+    "LINKER:-unexported_symbol,__ZdlPv"
+    "LINKER:-unexported_symbol,__ZdaPv")
+
+# The game's main() runs on a game thread (frontline::StartGame), so the
+# executable's own main can be the app's.
+set_source_files_properties("${_decomp}/src/game/Moh2.cpp" PROPERTIES COMPILE_DEFINITIONS "main=FrontlineGameMain")
+target_link_libraries(frontline_game INTERFACE frontline_platform)
