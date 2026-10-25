@@ -32,12 +32,22 @@ struct DisplayedFrame {
     uint32_t xfb;  // 32-bit address of the frame buffer (0: none yet)
     bool black;    // VISetBlack
     uint32_t retrace;
+    uint16_t width, height;  // frame buffer size (VIConfigure)
 };
 DisplayedFrame GetDisplayedFrame();
 
 // The displayed frame as rendered (RGBA8, width x height), for tools; false if
 // that frame buffer hasn't been drawn by GX. Pass null `rgba` for the size.
 bool ReadDisplayedFrame(uint8_t* rgba, uint32_t* width, uint32_t* height);
+
+// Memory cards: slot 0 (A) or 1 (B) holds the card kept in `folder` (created
+// if missing), as .gci files; null leaves the slot empty. Set before the game
+// starts. FRONTLINE_CARD_A and FRONTLINE_CARD_B override it.
+void SetCardFolder(int slot, const char* folder);
+
+// Sound: whether the DSP's mix plays on the default output device. On unless
+// turned off before the game starts (headless turns it off).
+void SetAudioOutput(bool enabled);
 
 // Controllers: the app's latest input for a port (err PAD_ERR_NO_CONTROLLER
 // when nothing is connected), and the rumble the game asks for.

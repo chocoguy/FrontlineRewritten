@@ -55,15 +55,22 @@ bool g_idleInterrupts = true;
 int g_interruptDepth;  // > 0 while handlers run: a wakeup switches threads only after them
 bool g_rescheduleLater;
 
+// The interrupt queue has a lock of its own, so the host threads that raise
+// interrupts (retrace, audio frames, disc) never wait on g_lock: a game thread
+// that spins on OS calls holds that almost all the time, and macOS mutexes
+// aren't fair, so they would starve (a 5 ms audio frame arriving seconds
+// late). They take g_lock only to wake a game thread waiting for an interrupt.
 struct Interrupt {
     InterruptFn fn;
     void* arg;
 };
 constexpr int kMaxInterrupts = 256;
+pthread_mutex_t g_queueLock = PTHREAD_MUTEX_INITIALIZER;
 Interrupt g_interrupts[kMaxInterrupts];
 int g_interruptHead;
 int g_interruptCount;
 std::atomic<int> g_pending;
+std::atomic<int> g_waiters;  // game-side threads waiting on g_idle
 
 // Host stacks for game threads, from the arena, reused when an OSThread is
 // created again.
@@ -176,6 +183,33 @@ int HighestReady() { return g_runMask != 0 ? __builtin_ctz(g_runMask) : kNumPrio
 
 bool* InterruptFlag() { return g_running != nullptr ? &Native(g_running)->interrupts : &g_idleInterrupts; }
 
+bool PopInterrupt(Interrupt* out) {
+    pthread_mutex_lock(&g_queueLock);
+    bool any = g_interruptCount > 0;
+    if (any) {
+        *out = g_interrupts[g_interruptHead];
+        g_interruptHead = (g_interruptHead + 1) % kMaxInterrupts;
+        g_interruptCount--;
+    }
+    pthread_mutex_unlock(&g_queueLock);
+    if (any) {
+        g_pending.fetch_sub(1, std::memory_order_relaxed);
+    }
+    return any;
+}
+
+// With g_lock held: sleeps until an interrupt is raised, unless one is
+// pending already (or `always`). The waiter count goes up before the pending
+// check and RaiseInterrupt bumps the pending count before reading it, so one
+// of the two always sees the other.
+void WaitForInterruptLocked(bool always) {
+    g_waiters.fetch_add(1);
+    if (always || g_pending.load() == 0) {
+        pthread_cond_wait(&g_idle, &g_lock);
+    }
+    g_waiters.fetch_sub(1);
+}
+
 // Runs the queued interrupts on this host thread, with interrupts disabled.
 void DeliverLocked() {
     g_interruptDepth++;
@@ -184,11 +218,8 @@ void DeliverLocked() {
     *flag = false;
     bool gameCode = t_gameCode;
     t_gameCode = true;
-    while (g_interruptCount > 0) {
-        Interrupt i = g_interrupts[g_interruptHead];
-        g_interruptHead = (g_interruptHead + 1) % kMaxInterrupts;
-        g_interruptCount--;
-        g_pending.fetch_sub(1, std::memory_order_relaxed);
+    Interrupt i;
+    while (PopInterrupt(&i)) {
         pthread_mutex_unlock(&g_lock);
         i.fn(i.arg);
         pthread_mutex_lock(&g_lock);
@@ -202,11 +233,11 @@ void DeliverLocked() {
 void IdleLocked() {
     g_running = nullptr;
     while (g_runMask == 0) {
-        if (g_interruptCount > 0 && g_idleInterrupts) {
+        if (g_pending.load() > 0 && g_idleInterrupts) {
             DeliverLocked();
             g_rescheduleLater = false;
         } else {
-            pthread_cond_wait(&g_idle, &g_lock);
+            WaitForInterruptLocked(!g_idleInterrupts);
         }
     }
 }
@@ -455,16 +486,20 @@ void Lock() { pthread_mutex_lock(&g_lock); }
 void Unlock() { pthread_mutex_unlock(&g_lock); }
 
 void RaiseInterrupt(InterruptFn fn, void* arg) {
-    pthread_mutex_lock(&g_lock);
+    pthread_mutex_lock(&g_queueLock);
     if (g_interruptCount == kMaxInterrupts) {
         std::fprintf(stderr, "frontline: interrupt queue overflow (the game isn't reaching safe points)\n");
         std::abort();
     }
     g_interrupts[(g_interruptHead + g_interruptCount) % kMaxInterrupts] = {fn, arg};
     g_interruptCount++;
-    g_pending.fetch_add(1, std::memory_order_release);
-    pthread_cond_broadcast(&g_idle);
-    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_unlock(&g_queueLock);
+    g_pending.fetch_add(1);
+    if (g_waiters.load() > 0) {
+        pthread_mutex_lock(&g_lock);
+        pthread_cond_broadcast(&g_idle);
+        pthread_mutex_unlock(&g_lock);
+    }
 }
 
 void SafePoint() {
@@ -477,7 +512,7 @@ void SafePoint() {
         return;
     }
     pthread_mutex_lock(&g_lock);
-    if (g_interruptCount > 0) {
+    if (g_pending.load() > 0) {
         DeliverLocked();
         if (g_rescheduleLater) {
             g_rescheduleLater = false;
@@ -537,9 +572,7 @@ void NativeSpinWait(void) {
         return;
     }
     pthread_mutex_lock(&g_lock);
-    if (g_interruptCount == 0) {
-        pthread_cond_wait(&g_idle, &g_lock);  // the caller's loop checks again
-    }
+    WaitForInterruptLocked(false);  // the caller's loop checks again
     pthread_mutex_unlock(&g_lock);
     SafePoint();
 }

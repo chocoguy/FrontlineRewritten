@@ -16,7 +16,7 @@ struct FragUniforms {
     uint32_t alphaComp[5];
     uint32_t fogType;
     uint32_t texValid;  // bit per texture map
-    float fog[4];       // start, end
+    float fog[4];       // a, B mantissa, c, B shift
     float fogColor[4];
     float indMtx[3][2][4];
     uint32_t indOrder[4][4];  // texcoord, map, scale s, scale t

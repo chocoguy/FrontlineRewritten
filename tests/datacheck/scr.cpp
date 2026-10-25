@@ -119,8 +119,11 @@ bool CheckSCR(const std::vector<uint8_t>& file, ScrStats& stats) {
     }
     for (u32 i = 0; i < data->numStrings; i++) {
         UISString_t* s = (UISString_t*)(base + data->strings.addr()) + i;
-        CHECK(s->maxLength < 0x10000 && inFile(s->text.addr(), s->maxLength) && s->text.addr() < codeStart,
+        CHECK(s->maxLength < 0x10000 && inFile(s->text.addr(), s->maxLength + 1) && s->text.addr() < codeStart,
               "string %u: %u at %#x", i, s->maxLength, s->text.addr());
+        // The buffer holds maxLength characters and a terminator, which the swap must leave in place.
+        CHECK(std::memchr(base + s->text.addr(), 0, s->maxLength + 1) != nullptr, "string %u: \"%.*s\" unterminated",
+              i, (int)s->maxLength, (const char*)base + s->text.addr());
         stats.strings++;
     }
     for (u32 i = 0; i < data->numStringRefs; i++) {

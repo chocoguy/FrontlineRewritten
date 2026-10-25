@@ -4,11 +4,32 @@ A native port of Medal of Honor: Frontline (GameCube, `GMFE69`) to macOS, iOS/iP
 
 **Goals**
 - Native Metal rendering
-- Enhancements and upgrades over the original (not an exact port)
+- Two ways to play the same game (see [Two modes](#two-modes-classic-and-rewritten)):
+  - **Classic:** the original game, as close to an exact port of the GameCube version as we can get.
+  - **Rewritten:** a modernized game that deliberately changes the original, such as smarter enemy AI.
 - A mod/sandbox system with lots of cheats
 - More robust multiplayer: AI opponents and LAN play
 
-**MVP:** a simple port with Metal rendering.
+**MVP:** a simple port with Metal rendering: Classic mode on macOS.
+
+## Two modes: Classic and Rewritten
+
+**Classic keeps all of the original behavior.** It plays, looks and sounds like the GameCube game, including its quirks. That covers game logic, AI, timing, rendering and the audio mix (a mix that overloads the output clips, as on the console).
+- Classic changes only what running on a Mac or iPhone forces: the window and scaling to the display, input devices and key mapping, saves as files, and the disc folder.
+- The GameCube build (`tools/regress.py`) and Dolphin stay its reference.
+
+**Rewritten changes the original on purpose.** It includes everything in Classic plus departures from it, such as:
+- enhanced enemy AI
+- gameplay and quality-of-life changes
+- modern presentation, like widescreen and a soft limiter on the audio output instead of hard clipping
+
+**Rules for the code:**
+- Classic is the default path. A Rewritten change is opt-in at run time and leaves the Classic path unchanged, so Classic can always be checked against the GameCube build and Dolphin.
+- One switch, read at run time, picks the mode. Native-only code checks it, so both modes ship in one build. A Rewritten change in the shared game source goes under `FRONTLINE_NATIVE` like other native code, and the GameCube build doesn't see it.
+- Keep each Rewritten change small and in one place, behind that switch, rather than forking whole files.
+- The mode is chosen per game, and saves remember it. A multiplayer session runs everyone in the same mode.
+
+Which phase builds what: Phase 1 is Classic. Phases 3–5 add mostly Rewritten features, and each one names the mode it belongs to.
 
 The game code in `FrontlineDecompiled/` is already finished: all 558 units build from source as functionally equivalent C/C++. So this roadmap doesn't start with decompiling. It starts with making that code run on 64-bit, little-endian Apple hardware.
 
@@ -76,6 +97,10 @@ Effort is relative: S, M, L, XL.
 - **System integration:** frame pacing with `CAMetalDisplayLink`, handling interruptions and backgrounding, safe areas and TV overscan, and MetalFX (Apple's upscaler) where available.
 
 ### Phase 3 — Enhancements (L)
+Rewritten mode unless marked otherwise.
+- **The mode switch:** a Classic/Rewritten choice when starting a game, saved with it. Build this before the first Rewritten feature.
+- **Enemy AI:** enhanced soldier AI (flanking, use of cover, grenade awareness), built on the decompiled `AISoldierObject`.
+- **Audio:** a soft limiter on the output instead of hard clipping.
 - **Widescreen:** done in `CCamera` so the field of view, culling, weapon model and HUD all agree.
 - **Image quality:** native resolution, anti-aliasing (MSAA), anisotropic filtering, MetalFX.
 - **Frame rate:** locked 60 fps, then 120 Hz on ProMotion screens.
@@ -86,8 +111,9 @@ Effort is relative: S, M, L, XL.
 - **Optional:** move the world and character rendering off the GameCube-style path onto a modern Metal renderer, for per-pixel lighting and shadows.
 
 ### Phase 4 — Mods and sandbox (L)
+The game's own cheats belong to Classic; everything new here is Rewritten.
 - **Cheat and sandbox menu:**
-  - all the existing `CCheats`
+  - all the existing `CCheats` (Classic too)
   - god mode, noclip, free camera and photo mode
   - time scale and low gravity
   - big heads and one-hit kills
@@ -101,6 +127,7 @@ Effort is relative: S, M, L, XL.
 - **Tools and delivery:** glTF/PNG export and import, and a level viewer. Mods reach iOS through Files and Apple TV through a push over the local network.
 
 ### Phase 5 — Multiplayer (XL)
+The original split-screen modes are Classic. LAN, bots and co-op are Rewritten additions, and every machine in a session plays in the same mode.
 - **Cheap groundwork during Phases 1–3:**
   - Send all player input through one per-tick command struct.
   - Add a fixed-tick simulation mode.
@@ -163,6 +190,7 @@ Effort is relative: S, M, L, XL.
 3. **"Play against AI":** deathmatch bots, co-op campaign, or both. This sets the order within Phase 5.
 4. **Internet play:** if it's a must-have someday, revisit lockstep vs. client–server before Phase 5.
 5. **Device floor:** keep the core renderer on baseline Metal features so older Apple TVs work, and switch on extras like MetalFX only where the device supports them.
+6. **Image quality in Classic:** whether settings that only sharpen the picture (native resolution, anti-aliasing, anisotropic filtering, 60 fps where the original drops frames) may be turned on in Classic, or are Rewritten only. Strict Classic keeps the original 640×448 picture.
 
 ## References
 - [aurora (GitHub)](https://github.com/encounter/aurora)

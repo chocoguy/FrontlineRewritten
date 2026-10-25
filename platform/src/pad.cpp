@@ -3,9 +3,16 @@
 // samples once per retrace and runs the sampling callback then (vi.cpp calls
 // PadSample), where EA's pad layer reads. PADClamp is the SDK's dead zone and
 // octagon clamp, so sticks behave as on the console.
+//
+// FRONTLINE_INPUT scripts controller 1 for testing: presses at given seconds
+// after start, for a moment each or held for "+seconds", on top of the app's
+// input: "5:A,8:START+1,12.5:A". Buttons: A B X Y Z L R START UP DOWN LEFT
+// RIGHT, and SUP SDOWN SLEFT SRIGHT push the main stick.
 
 #include <pthread.h>
 
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "dolphin/pad.h"
@@ -46,6 +53,82 @@ void ClampStick(s8* px, s8* py, s8 max, s8 xy, s8 min) {
     *py = (s8)(signY * y);
 }
 
+// FRONTLINE_INPUT. Buttons in the low 16 bits; stick directions above them.
+struct Press {
+    float time;
+    float duration;
+    u32 bits;
+};
+Press g_script[256];
+int g_scriptLength = -1;
+
+u32 ScriptBit(const char* name) {
+    static const struct {
+        const char* name;
+        u32 bit;
+    } kNames[] = {{"LEFT", 0x0001},   {"RIGHT", 0x0002}, {"DOWN", 0x0004},    {"UP", 0x0008},     {"Z", 0x0010},
+                  {"R", 0x0020},      {"L", 0x0040},     {"A", 0x0100},       {"B", 0x0200},      {"X", 0x0400},
+                  {"Y", 0x0800},      {"START", 0x1000}, {"SUP", 0x10000},    {"SDOWN", 0x20000}, {"SLEFT", 0x40000},
+                  {"SRIGHT", 0x80000}};
+    for (auto& n : kNames) {
+        if (std::strcmp(name, n.name) == 0) {
+            return n.bit;
+        }
+    }
+    std::fprintf(stderr, "frontline: FRONTLINE_INPUT: no button %s\n", name);
+    return 0;
+}
+
+void LoadScript() {
+    g_scriptLength = 0;
+    const char* env = std::getenv("FRONTLINE_INPUT");
+    if (env == nullptr) {
+        return;
+    }
+    static char script[8192];
+    std::snprintf(script, sizeof(script), "%s", env);
+    char* save;
+    for (char* item = strtok_r(script, ",", &save); item != nullptr && g_scriptLength < 256;
+         item = strtok_r(nullptr, ",", &save)) {
+        char* colon = std::strchr(item, ':');
+        if (colon == nullptr) {
+            continue;
+        }
+        *colon = 0;
+        float duration = 0.2f;
+        if (char* plus = std::strchr(colon + 1, '+')) {
+            *plus = 0;
+            duration = (float)std::atof(plus + 1);
+        }
+        g_script[g_scriptLength++] = {(float)std::atof(item), duration, ScriptBit(colon + 1)};
+    }
+}
+
+// Controller 1 with the script's presses at this moment.
+void ApplyScript(PADStatus* status) {
+    if (g_scriptLength < 0) {
+        LoadScript();
+    }
+    if (g_scriptLength == 0) {
+        return;
+    }
+    float t = (float)frontline::os::Now() / OS_TIMER_CLOCK;
+    u32 held = 0;
+    for (int i = 0; i < g_scriptLength; i++) {
+        if (t >= g_script[i].time && t < g_script[i].time + g_script[i].duration) {
+            held |= g_script[i].bits;
+        }
+    }
+    status->err = PAD_ERR_NONE;
+    status->button |= (u16)held;
+    if (held & 0x30000) {
+        status->stickY = (held & 0x10000) ? 100 : -100;
+    }
+    if (held & 0xC0000) {
+        status->stickX = (held & 0x80000) ? 100 : -100;
+    }
+}
+
 void ClampTrigger(u8* trigger, u8 min, u8 max) {
     if (*trigger <= min) {
         *trigger = 0;
@@ -80,6 +163,7 @@ u32 PADRead(PADStatus* status) {
     pthread_mutex_lock(&g_lock);
     std::memcpy(status, g_state, sizeof(g_state));
     pthread_mutex_unlock(&g_lock);
+    ApplyScript(&status[0]);
     return 0;
 }
 

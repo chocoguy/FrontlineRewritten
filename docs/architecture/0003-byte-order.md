@@ -57,7 +57,9 @@ The rule depends on **who reads the data**:
 |---|---|
 | **Big-endian** (swapped at load natively) | `.cdb`, `.cpt`, `.msh`, `.mpk`, `.dmf` (version 6), `.tpk`, `.gsh` headers, `.gfn` fonts, `.scr` UI screens, `.aem` sound event systems, `.abk` module banks and the `BNKb` sample banks inside them, `.mpf` music maps |
 | **Little-endian, PS2-era** (the GameCube's swaps turn off natively) | `.emt`, `.lfc`, `.bpd`, `.som`, `.skl`, `.mvd`, `.cls`, `.cbs`/`.sin` scripts, `bsbifunc.dat` (built-ins), `weapbul_*.dat` (bullet tables) |
-| **Bytes** (no order) | `.bum` message text and index, script and UI bytecode (read a byte at a time), sample data (the DSP decoder reads it as is) |
+| **Bytes** (no order) | `.bum` message text and index, script and UI bytecode (read a byte at a time), DSP ADPCM and EA-XA sample data |
+| **Left big-endian, read big-endian** (never swapped) | 16-bit PCM samples and the XA packets' starting decoder state, in banks and streams: the AX mixer and EA's CPU decoders read them big-endian (`SAMPLE_S16`), and ARAM holds what the console's would |
+| **Mixed** | EA stream chunks (`.asf`, `.mus`, movie audio): `SCHl`/`SCDl` tag and size are little-endian (STREAM reads them with `getle`), the sample count and channel offsets after them big-endian (`CHUNK_WORD`) |
 
 How it's handled:
 - **Swap passes.** Each big-endian loader gets a native swap pass (`CDBFromBigEndian`, `CPTFromBigEndian`, `StaticMeshFromBigEndian`, `DMeshFromBigEndian`, `TexturePackFromBigEndian`, `ShapeFileFromBigEndian`, …) that runs before relocation. It swaps exactly the fields the CPU reads; GPU payloads stay big-endian.

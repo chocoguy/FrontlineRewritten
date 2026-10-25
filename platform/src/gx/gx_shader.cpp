@@ -14,8 +14,7 @@ struct Vertex {
     float4 pos;
     float4 color[2];
     float4 tex[8];
-    float eyeZ;
-    float pad[3];
+    float pad[4];
 };
 
 struct Uniforms {
@@ -49,7 +48,6 @@ struct VOut {
     float4 tex5;
     float4 tex6;
     float4 tex7;
-    float eyeZ;
 };
 
 vertex VOut tev_vertex(uint vid [[vertex_id]], const device Vertex* verts [[buffer(0)]]) {
@@ -66,7 +64,6 @@ vertex VOut tev_vertex(uint vid [[vertex_id]], const device Vertex* verts [[buff
     o.tex5 = v.tex[5];
     o.tex6 = v.tex[6];
     o.tex7 = v.tex[7];
-    o.eyeZ = v.eyeZ;
     return o;
 }
 
@@ -284,10 +281,13 @@ fragment float4 tev_fragment(VOut in [[stage_in]], constant Uniforms& u [[buffer
     }
     if (!pass) discard_fragment();
 
-    // Fog
+    // Fog, from the pixel's 24-bit screen depth as the hardware does it
+    // (GXSetFog): ze = a * 2^24 / (B mantissa - (Z >> B shift)), fog = ze - c.
     uint ft = u.fogType & 7;
     if (ft >= 2) {
-        float f = clamp((in.eyeZ - u.fog.x) / max(u.fog.y - u.fog.x, 1e-6), 0.0, 1.0);
+        float z = min(floor(in.pos.z * 16777216.0), 16777215.0);
+        float ze = u.fog.x * 16777216.0 / (u.fog.y - floor(z / exp2(u.fog.w)));
+        float f = clamp(ze - u.fog.z, 0.0, 1.0);
         switch (ft) {
         case 4: f = 1.0 - exp2(-8.0 * f); break;
         case 5: f = 1.0 - exp2(-8.0 * f * f); break;

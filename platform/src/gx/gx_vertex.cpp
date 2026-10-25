@@ -302,7 +302,6 @@ void Transform(const RawVertex& rv, Vertex& out) {
         out.pos[3] = 1.0f;
     }
     out.pos[2] += out.pos[3];
-    out.eyeZ = -eye[2];
 
     for (int c = 0; c < 2; c++) {
         float* color = out.color[c];

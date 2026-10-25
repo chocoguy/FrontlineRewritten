@@ -11,8 +11,7 @@ struct Vertex {
     float pos[4];  // clip space (Metal conventions)
     float color[2][4];
     float tex[8][4];  // s, t, q
-    float eyeZ;       // for fog
-    float pad[3];
+    float pad[4];
 };
 
 // Draws `count` vertices of primitive `prim` (0x80 quads .. 0xB8 points) in

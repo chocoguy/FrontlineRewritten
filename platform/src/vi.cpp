@@ -28,6 +28,8 @@ void* g_nextFb;  // VISetNextFrameBuffer
 bool g_nextBlack = true;
 void* g_flushedFb;  // VIFlush latches these for the next retrace
 bool g_flushedBlack = true;
+// VIConfigure's frame buffer size: 640 x 448 until the game configures it.
+std::atomic<uint32_t> g_fbSize{640u << 16 | 448u};
 
 std::atomic<uint64_t> g_displayed;  // the displayed frame buffer's address << 1 | black
 std::atomic<uint32_t> g_displayedRetrace;
@@ -61,7 +63,9 @@ void* RetraceThread(void*) {
 
 frontline::DisplayedFrame frontline::GetDisplayedFrame() {
     uint64_t v = g_displayed.load(std::memory_order_acquire);
-    return {(uint32_t)(v >> 1), (v & 1) != 0, g_displayedRetrace.load(std::memory_order_acquire)};
+    uint32_t size = g_fbSize.load(std::memory_order_relaxed);
+    return {(uint32_t)(v >> 1), (v & 1) != 0, g_displayedRetrace.load(std::memory_order_acquire),
+            (uint16_t)(size >> 16), (uint16_t)size};
 }
 
 extern "C" {
@@ -87,7 +91,10 @@ VIRetraceCallback VISetPreRetraceCallback(VIRetraceCallback callback) {
     return prev;
 }
 
-void VIConfigure(const GXRenderModeObj*) { frontline::os::SafePoint(); }
+void VIConfigure(const GXRenderModeObj* mode) {
+    frontline::os::SafePoint();
+    g_fbSize.store((uint32_t)mode->fbWidth << 16 | mode->xfbHeight, std::memory_order_relaxed);
+}
 
 void VISetNextFrameBuffer(void* fb) {
     BOOL level = OSDisableInterrupts();

@@ -570,10 +570,41 @@ void GXSetZMode(u8 enable, u32 func, u8 update) {
 }
 void GXSetZCompLoc(u8 beforeTex) { g_state.zBeforeTex = beforeTex != 0; }
 void GXSetCullMode(u32 mode) { g_state.cullMode = mode; }
+// The hardware fogs by a pixel's screen depth, not its distance: the SDK packs
+// ze = A / (B - z) into registers (A and C with 11 mantissa bits, B as a 24-bit
+// mantissa and a shift), and the fog is ze - C. That is the eye distance only
+// for draws made with the projection the near and far planes describe; 2D
+// drawn near the front stays clear although the game leaves fog on.
 void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color) {
+    f32 A = 0.0f, B = 0.5f, C = 0.0f;
+    if (farz != nearz && endz != startz) {
+        A = (farz * nearz) / ((farz - nearz) * (endz - startz));
+        B = farz / (farz - nearz);
+        C = startz / (endz - startz);
+    }
+    f32 mant = B;
+    int expn = 0;
+    while (mant > 1.0f) {
+        mant /= 2;
+        expn++;
+    }
+    while (mant > 0 && mant < 0.5f) {
+        mant *= 2;
+        expn--;
+    }
+    auto truncate = [](f32 v) {
+        u32 bits;
+        std::memcpy(&bits, &v, 4);
+        bits &= 0xFFFFF000u;
+        std::memcpy(&v, &bits, 4);
+        return v;
+    };
     g_state.fogType = type;
     f32* f = g_state.fog;
-    f[0] = startz, f[1] = endz, f[2] = nearz, f[3] = farz;
+    f[0] = truncate(std::ldexp(A, -(expn + 1)));
+    f[1] = (f32)(u32)(8.388638e6f * mant);
+    f[2] = truncate(C);
+    f[3] = (f32)((expn + 1) & 0x1F);
     std::memcpy(g_state.fogColor, &color, 4);
 }
 

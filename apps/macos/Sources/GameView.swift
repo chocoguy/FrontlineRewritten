@@ -1,26 +1,38 @@
 import MetalKit
 import SwiftUI
 
-/// Hosts the Metal view the game draws into.
+/// Hosts the Metal view the game shows in.
 struct GameView: NSViewRepresentable {
-    func makeCoordinator() -> Renderer? {
+    func makeCoordinator() -> Renderer {
         Renderer()
     }
 
     func makeNSView(context: Context) -> MTKView {
-        let view = MTKView()
-        guard let renderer = context.coordinator else {
-            return view
-        }
-        view.device = renderer.device
+        let view = KeyboardView()
+        view.device = FrontlineDevice()
         view.colorPixelFormat = .bgra8Unorm
-        view.clearColor = MTLClearColor(red: 0.10, green: 0.12, blue: 0.10, alpha: 1)
-        // The game's simulation is paced by its own 60 Hz clock (ROADMAP gotcha 5);
-        // the view just presents at the display's rate.
+        view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+        // The game keeps its own 60 Hz clock (ROADMAP gotcha 5); the view only
+        // shows its latest frame, at the display's rate.
         view.preferredFramesPerSecond = 60
-        view.delegate = renderer
+        view.delegate = context.coordinator
         return view
     }
 
     func updateNSView(_ view: MTKView, context: Context) {}
+}
+
+/// Takes the keyboard focus, so key presses reach the game (read through
+/// GCKeyboard) instead of beeping.
+final class KeyboardView: MTKView {
+    override var acceptsFirstResponder: Bool { true }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        window?.makeFirstResponder(self)
+    }
+
+    override func keyDown(with event: NSEvent) {}
+    override func keyUp(with event: NSEvent) {}
+    override func flagsChanged(with event: NSEvent) {}
 }

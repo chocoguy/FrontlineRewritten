@@ -8,8 +8,7 @@ This repository contains **no game data**. You need your own copy of the game (U
 ## Status
 
 **Phase 0 (groundwork) is done; Phase 1 is in progress.**
-- The game links and boots natively from your disc: it loads its data, starts its threads, and runs its frame loop at 59.94 Hz up to the "Press Start" screen.
-- Nothing is drawn yet: the GX → Metal renderer is next. Sound runs silently, and there are no memory cards yet.
+- The game runs natively from your disc in a macOS window: menus, movies, every mission, with sound and memory card saves.
 - The data checker validates the converted loaders against your disc (12 big-endian formats).
 - Details: [docs/port/phase1-status.md](docs/port/phase1-status.md).
 - The GameCube build stays unchanged.
@@ -44,6 +43,25 @@ open build/xcode/FrontlineRewritten.xcodeproj
 
 Run the `FrontlineMac` scheme. To build from the command line instead, use `cmake --build --preset xcode --target FrontlineMac`.
 
+On first launch the app asks for your extracted disc (the folder holding `sys` and `files`) and remembers it. You can also pass it with `-disc <folder>` or the `FRONTLINE_DISC` environment variable.
+
+Saves go to the memory card in slot A: `~/Library/Application Support/Frontline Rewritten/Memory Card A`, one `.gci` file per save (the format of Dolphin's GCI folders and GameCube save tools), so saves can be copied to and from Dolphin or a console. `-memoryCard <folder>` uses another folder, and `FRONTLINE_CARD_A` / `FRONTLINE_CARD_B` set either slot.
+
+Controls: a game controller (left and right sticks are the main and C sticks, triggers are L and R, a shoulder button is Z, Menu is START), or the keyboard:
+
+| Keys | GameCube |
+|---|---|
+| W A S D | Main stick |
+| Arrow keys | C stick |
+| Space | A |
+| Left Shift | B |
+| F | X |
+| R | Y |
+| Tab | Z |
+| Q / E | L / R |
+| Return | START |
+| I J K L | D-pad |
+
 **Data check:** loads the converted file formats from your disc through the native loaders and validates them:
 
 ```sh
@@ -51,7 +69,7 @@ cmake --build --preset ninja --target frontline_datacheck
 build/ninja/tests/datacheck/frontline_datacheck FrontlineDecompiled/orig/GMFE69/disc
 ```
 
-**Headless run:** boots the game with no window or sound for a number of seconds (a smoke test), optionally saving the displayed frame each second:
+**Headless run:** boots the game with no window or sound for a number of seconds (a smoke test), optionally saving the displayed frame each second (and, with `FRONTLINE_AUDIO_DUMP=<file.wav>`, the sound):
 
 ```sh
 cmake --build --preset ninja --target frontline_headless

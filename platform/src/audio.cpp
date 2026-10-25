@@ -1,10 +1,21 @@
 // AI/AR/ARQ/AX: audio, and the 16 MB of auxiliary RAM the sound banks live in.
 //
 // ARAM is a host buffer; ARQ transfers copy at once and complete through an
-// interrupt, like the DMA. AX keeps the voices' parameter blocks and runs the
-// game's frame callbacks every 5 ms (the DSP's frame), so EA's sound driver
-// thread runs as on the console. Mixing the voices to Core Audio comes later;
-// until then the frames are silent.
+// interrupt, like the DMA. ARAM holds what the console's would, so its 16-bit
+// samples are big-endian.
+//
+// AX is the DSP's mixer, done here on the CPU: every 5 ms frame (160 samples
+// at 32 kHz) an interrupt mixes the running voices (DSP ADPCM, PCM16 or PCM8
+// from ARAM, resampled, through their volume envelope) into the main and aux
+// buses, runs the game's aux A callback, which takes the aux A send and returns
+// its own CPU mix (EA's software voices and reverb), adds that return to the
+// main mix and sends it to the speakers (audio_out.cpp). Then the frame
+// callback runs, as on the console. Voices are read and updated in place in
+// their parameter blocks, which the game also reads (play positions, stopped
+// voices); the sync flags don't matter here.
+//
+// FRONTLINE_AUDIO_TRACE=1 prints each voice start, and the output buffer's
+// state every 10 seconds.
 
 #include <mach/mach_time.h>
 #include <pthread.h>
@@ -16,6 +27,7 @@
 #include "dolphin/ai.h"
 #include "dolphin/ar.h"
 #include "dolphin/ax.h"
+#include "audio_out.h"
 #include "os/os_internal.h"
 
 namespace {
@@ -46,26 +58,190 @@ void ArqDone(void* arg) {
 }
 
 // AX
+constexpr int kFrameSamples = 160;
+
 AXVPB g_voices[AX_MAX_VOICES];
 bool g_voiceUsed[AX_MAX_VOICES];
 AXAuxCallback g_auxA;
 void* g_auxAContext;
 AXUserCallback g_userCallback;
-s32 g_auxBuffers[3][160];  // left, right, surround: one 5 ms frame at 32 kHz
 bool g_axRunning;
+int g_trace = -1;
 
-void AxFrame(void*) {
-    if (!g_axRunning) {
-        return;
+// The buses: main, aux A and aux B, each left, right and surround.
+enum { kMain, kAuxA, kAuxB };
+s32 g_bus[3][3][kFrameSamples];
+
+inline u32 Join(u16 hi, u16 lo) { return (u32)hi << 16 | lo; }
+
+inline s16 Clamp16(s32 v) { return (s16)(v < -0x8000 ? -0x8000 : v > 0x7FFF ? 0x7FFF : v); }
+
+// The next sample of a running voice, as the DSP's accelerator reads it:
+// addresses count samples (nibbles for ADPCM), the end address is the last
+// sample, and at the end the voice loops or stops.
+s16 NextSample(AXPB& pb) {
+    u32 cur = Join(pb.addr.currentAddressHi, pb.addr.currentAddressLo);
+    s32 v;
+    switch (pb.addr.format) {
+    case 0: {  // DSP ADPCM: 8-byte frames of a header byte and 14 nibbles
+        if ((cur & 15) == 0) {
+            pb.adpcm.pred_scale = g_aram[(cur >> 1) & (kAramSize - 1)];
+            cur += 2;
+        }
+        u8 byte = g_aram[(cur >> 1) & (kAramSize - 1)];
+        s32 nibble = (cur & 1) != 0 ? byte & 0xF : byte >> 4;
+        if (nibble >= 8) {
+            nibble -= 16;
+        }
+        u32 pred = (pb.adpcm.pred_scale >> 4) & 7;
+        s32 c1 = (s16)pb.adpcm.a[pred][0], c2 = (s16)pb.adpcm.a[pred][1];
+        v = (nibble << (pb.adpcm.pred_scale & 0xF)) + ((0x400 + c1 * (s16)pb.adpcm.yn1 + c2 * (s16)pb.adpcm.yn2) >> 11);
+        v = Clamp16(v);
+        pb.adpcm.yn2 = pb.adpcm.yn1;
+        pb.adpcm.yn1 = (u16)v;
+        break;
     }
+    case 10: {  // PCM16, scaled by the gain (0x800 is 1)
+        const u8* p = g_aram + ((cur * 2) & (kAramSize - 1));
+        v = Clamp16(((s16)(p[0] << 8 | p[1]) * (s32)pb.adpcm.gain) >> 11);
+        break;
+    }
+    case 25:  // PCM8
+        v = Clamp16(((s8)g_aram[cur & (kAramSize - 1)] << 8) * (s32)pb.adpcm.gain >> 11);
+        break;
+    default:
+        v = 0;
+        break;
+    }
+    if (cur == Join(pb.addr.endAddressHi, pb.addr.endAddressLo)) {
+        if (pb.addr.loopFlag) {
+            cur = Join(pb.addr.loopAddressHi, pb.addr.loopAddressLo);
+            if (pb.addr.format == 0) {
+                pb.adpcm.pred_scale = pb.adpcmLoop.loop_pred_scale;
+                pb.adpcm.yn1 = pb.adpcmLoop.loop_yn1;
+                pb.adpcm.yn2 = pb.adpcmLoop.loop_yn2;
+            }
+        } else {
+            pb.state = AX_PB_STATE_STOP;
+        }
+    } else {
+        cur++;
+    }
+    pb.addr.currentAddressHi = (u16)(cur >> 16);
+    pb.addr.currentAddressLo = (u16)cur;
+    return (s16)v;
+}
+
+// One frame of a voice: resampled (linear) from its source rate, through the
+// volume envelope, into each bus at its mix volume. Volumes are 1.15 fixed
+// point (0x8000 is 1) and ramp by their deltas each sample.
+void MixVoice(AXPB& pb) {
+    s32 out[kFrameSamples];
+    u32 ratio = Join(pb.src.ratioHi, pb.src.ratioLo);
+    u32 frac = pb.src.currentAddressFrac;
+    s32 s0 = (s16)pb.src.last_samples[2], s1 = (s16)pb.src.last_samples[3];
+    s32 vol = pb.ve.currentVolume;
+    for (int i = 0; i < kFrameSamples; i++) {
+        s32 s = s0 + (((s1 - s0) * (s32)frac) >> 16);
+        out[i] = (s * vol) >> 15;
+        vol += pb.ve.currentDelta;
+        vol = vol < 0 ? 0 : vol > 0xFFFF ? 0xFFFF : vol;
+        for (frac += ratio; frac >= 0x10000; frac -= 0x10000) {
+            s0 = s1;
+            s1 = pb.state == AX_PB_STATE_RUN ? NextSample(pb) : 0;
+        }
+    }
+    pb.src.currentAddressFrac = (u16)frac;
+    pb.src.last_samples[2] = (u16)s0;
+    pb.src.last_samples[3] = (u16)s1;
+    pb.ve.currentVolume = (u16)vol;
+
+    struct Send {
+        u16* vol;
+        u16* delta;
+        s32* bus;
+    } sends[] = {
+        {&pb.mix.vL, &pb.mix.vDeltaL, g_bus[kMain][0]},          {&pb.mix.vR, &pb.mix.vDeltaR, g_bus[kMain][1]},
+        {&pb.mix.vS, &pb.mix.vDeltaS, g_bus[kMain][2]},          {&pb.mix.vAuxAL, &pb.mix.vDeltaAuxAL, g_bus[kAuxA][0]},
+        {&pb.mix.vAuxAR, &pb.mix.vDeltaAuxAR, g_bus[kAuxA][1]}, {&pb.mix.vAuxAS, &pb.mix.vDeltaAuxAS, g_bus[kAuxA][2]},
+        {&pb.mix.vAuxBL, &pb.mix.vDeltaAuxBL, g_bus[kAuxB][0]}, {&pb.mix.vAuxBR, &pb.mix.vDeltaAuxBR, g_bus[kAuxB][1]},
+        {&pb.mix.vAuxBS, &pb.mix.vDeltaAuxBS, g_bus[kAuxB][2]},
+    };
+    for (Send& send : sends) {
+        s32 v = *send.vol, delta = (s16)*send.delta;
+        if (v == 0 && delta <= 0) {
+            continue;
+        }
+        for (int i = 0; i < kFrameSamples; i++) {
+            send.bus[i] += (out[i] * v) >> 15;
+            v += delta;
+            v = v < 0 ? 0 : v > 0xFFFF ? 0xFFFF : v;
+        }
+        *send.vol = (u16)v;
+    }
+}
+
+void TraceStart(const AXVPB& p) {
+    const AXPB& pb = p.pb;
+    std::fprintf(stderr,
+                 "[ax] voice %u: format %u, %s %#x..%#x loop %#x, ratio %.3f, volume %#x, mix L %#x R %#x A %#x\n",
+                 p.index, pb.addr.format, pb.addr.loopFlag ? "looping" : "once",
+                 Join(pb.addr.currentAddressHi, pb.addr.currentAddressLo),
+                 Join(pb.addr.endAddressHi, pb.addr.endAddressLo), Join(pb.addr.loopAddressHi, pb.addr.loopAddressLo),
+                 Join(pb.src.ratioHi, pb.src.ratioLo) / 65536.0, pb.ve.currentVolume, pb.mix.vL, pb.mix.vR,
+                 pb.mix.vAuxAL);
+}
+
+void RunFrame() {
+    std::memset(g_bus, 0, sizeof(g_bus));
+    for (AXVPB& p : g_voices) {
+        if (p.pb.state == AX_PB_STATE_RUN) {
+            MixVoice(p.pb);
+        }
+    }
+    // The aux A callback replaces the send with what goes back to the main mix.
     if (g_auxA != nullptr) {
-        std::memset(g_auxBuffers, 0, sizeof(g_auxBuffers));
-        void* data[3] = {g_auxBuffers[0], g_auxBuffers[1], g_auxBuffers[2]};
+        void* data[3] = {g_bus[kAuxA][0], g_bus[kAuxA][1], g_bus[kAuxA][2]};
         g_auxA(data, g_auxAContext);
+        for (int c = 0; c < 3; c++) {
+            for (int i = 0; i < kFrameSamples; i++) {
+                g_bus[kMain][c][i] += g_bus[kAuxA][c][i];
+            }
+        }
+    }
+    s16 frames[kFrameSamples][2];
+    for (int i = 0; i < kFrameSamples; i++) {
+        frames[i][0] = Clamp16(g_bus[kMain][0][i]);
+        frames[i][1] = Clamp16(g_bus[kMain][1][i]);
+    }
+    frontline::audio::Output(frames, kFrameSamples);
+    static u32 count;
+    if (g_trace > 0 && ++count % 2000 == 0) {
+        frontline::audio::PrintStats();
     }
     if (g_userCallback != nullptr) {
         g_userCallback();
     }
+}
+
+// The frame interrupt. The aux callback enables interrupts, so a late frame
+// can arrive inside one: it runs after, rather than over it.
+void AxFrame(void*) {
+    static bool running;
+    static int late;
+    if (!g_axRunning) {
+        return;
+    }
+    if (running) {
+        late++;
+        return;
+    }
+    running = true;
+    RunFrame();
+    for (; late > 0; late--) {
+        RunFrame();
+    }
+    running = false;
 }
 
 void* FrameThread(void*) {
@@ -138,6 +314,10 @@ void AXInit(void) {
         g_voices[i].index = i;
     }
     g_axRunning = true;
+    if (g_trace < 0) {
+        g_trace = std::getenv("FRONTLINE_AUDIO_TRACE") != nullptr;
+    }
+    frontline::audio::StartOutput();
     if (!started) {
         started = true;
         pthread_t thread;
@@ -171,7 +351,12 @@ void AXFreeVoice(AXVPB* p) {
 }
 
 void AXSetVoiceSrcType(AXVPB* p, u32 type) { p->pb.srcSelect = (u16)type; }
-void AXSetVoiceState(AXVPB* p, u16 state) { p->pb.state = state; }
+void AXSetVoiceState(AXVPB* p, u16 state) {
+    if (g_trace > 0 && state == AX_PB_STATE_RUN && p->pb.state != AX_PB_STATE_RUN) {
+        TraceStart(*p);
+    }
+    p->pb.state = state;
+}
 void AXSetVoiceAddr(AXVPB* p, AXPBADDR* addr) { p->pb.addr = *addr; }
 void AXSetVoiceAdpcm(AXVPB* p, AXPBADPCM* adpcm) { p->pb.adpcm = *adpcm; }
 void AXSetVoiceAdpcmLoop(AXVPB* p, AXPBADPCMLOOP* loop) { p->pb.adpcmLoop = *loop; }

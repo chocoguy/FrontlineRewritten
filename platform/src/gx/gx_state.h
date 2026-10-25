@@ -155,7 +155,7 @@ struct State {
     bool colorUpdate;
     uint32_t cullMode;
     uint32_t fogType;
-    float fog[4];  // startz, endz, nearz, farz
+    float fog[4];  // the registers: a, B mantissa, c, B shift (GXSetFog)
     uint8_t fogColor[4];
     uint8_t clearColor[4];
     uint32_t clearZ;

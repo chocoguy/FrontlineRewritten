@@ -45,11 +45,21 @@ NSMutableDictionary<NSNumber*, NSArray*>* g_textures;  // key -> [contents hash,
 NSMutableArray<id<MTLBuffer>>* g_freeBuffers;
 os_unfair_lock g_bufferLock = OS_UNFAIR_LOCK_INIT;
 
-// Frame buffer textures by address (the game uses two).
+// Frame buffer textures by address (the game uses two). The console's copy
+// writes the frame into the frame buffer's memory; this one writes only a
+// stamp there, so a frame the CPU wrote since (the movie player's YUV) shows
+// instead of the texture (see XfbTexture).
 struct Xfb {
     uint32_t addr;
+    uint32_t stamp;
     id<MTLTexture> texture;
 };
+constexpr uint32_t kXfbMagic = 0x46584742;  // "FXGB"
+
+bool Stamped(const Xfb& x) {
+    const uint32_t* words = ADDR_TO_PTR(const uint32_t, x.addr);
+    return words[0] == kXfbMagic && words[1] == x.stamp;
+}
 Xfb g_xfbs[4];
 os_unfair_lock g_xfbLock = OS_UNFAIR_LOCK_INIT;
 
@@ -474,8 +484,7 @@ traced:
     }
     std::memcpy(u.alphaComp, s.alphaComp, sizeof(u.alphaComp));
     u.fogType = s.fogType;
-    u.fog[0] = s.fog[0];
-    u.fog[1] = s.fog[1];
+    std::memcpy(u.fog, s.fog, sizeof(u.fog));
     for (int c = 0; c < 4; c++) {
         u.fogColor[c] = s.fogColor[c] / 255.0f;
     }
@@ -603,6 +612,7 @@ void CopyDisp(void* dest, bool clear) {
                 x.texture = [g_device newTextureWithDescriptor:desc];
             }
             x.addr = addr;
+            x.stamp = g_copyCount;
             target = x.texture;
             break;
         }
@@ -631,6 +641,10 @@ void CopyDisp(void* dest, bool clear) {
     std::memcpy(g_pendingClearColor, g_state.clearColor, 4);
     g_pendingClearZ = g_state.clearZ;
     Commit();
+    // After the commit, so the display never takes the texture before its copy.
+    uint32_t* words = static_cast<uint32_t*>(dest);
+    words[1] = g_copyCount;
+    words[0] = kXfbMagic;
 }
 
 void SetCopySource(uint16_t left, uint16_t top, uint16_t width, uint16_t height) {
@@ -652,11 +666,16 @@ id<MTLDevice> Device() {
     return g_device;
 }
 
+id<MTLCommandQueue> Queue() {
+    Init();
+    return g_queue;
+}
+
 id<MTLTexture> XfbTexture(uint32_t addr) {
     id<MTLTexture> texture = nil;
     os_unfair_lock_lock(&g_xfbLock);
     for (Xfb& x : g_xfbs) {
-        if (x.addr == addr && addr != 0) {
+        if (x.addr == addr && addr != 0 && Stamped(x)) {
             texture = x.texture;
         }
     }

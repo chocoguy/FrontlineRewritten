@@ -1,0 +1,17 @@
+// The video output on screen, for the app (Objective-C++).
+#pragma once
+
+#import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
+
+namespace frontline {
+
+// The device the game renders with; a view that shows the game must use it.
+id<MTLDevice> MetalDevice();
+
+// Draws the frame the video output shows now into `drawable` and presents it:
+// scaled to the largest 4:3 picture that fits, with black bars, its lines
+// placed on a 480-line NTSC screen. Call from one thread (the app's main one).
+void Present(id<CAMetalDrawable> drawable);
+
+}  // namespace frontline

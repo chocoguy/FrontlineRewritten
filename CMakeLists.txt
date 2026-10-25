@@ -7,7 +7,7 @@ set(CMAKE_OSX_DEPLOYMENT_TARGET 27.0 CACHE STRING "Minimum macOS version")
 project(FrontlineRewritten
     VERSION 0.0.1
     DESCRIPTION "Native Apple port of Medal of Honor: Frontline (GMFE69)"
-    LANGUAGES C CXX)
+    LANGUAGES C CXX OBJCXX)
 
 if(NOT APPLE)
     message(FATAL_ERROR "FrontlineRewritten only builds for Apple platforms.")

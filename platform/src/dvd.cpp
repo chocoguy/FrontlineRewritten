@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include "dolphin/dvd.h"
+#include "dolphin/dvd_priv.h"
 #include "frontline/platform.h"
 #include "os/os_internal.h"
 
@@ -277,6 +278,26 @@ s32 DVDGetDriveStatus(void) {
     s32 status = g_inFlight > 0 ? 1 : 0;
     pthread_mutex_unlock(&g_lock);
     return status;
+}
+
+// The disc's ID (sys/boot.bin's first 0x20 bytes), which the console keeps at
+// 0x80000000: the game and maker codes the memory card files are stamped with.
+DVDDiskID* DVDGetCurrentDiskID(void) {
+    static DVDDiskID id;
+    static bool loaded;
+    if (!loaded && Root() != nullptr) {
+        loaded = true;
+        char path[4096];
+        std::snprintf(path, sizeof(path), "%s/sys/boot.bin", Root());
+        FILE* in = std::fopen(path, "rb");
+        if (in == nullptr || std::fread(&id, 1, sizeof(id), in) != sizeof(id)) {
+            std::fprintf(stderr, "frontline: can't read %s\n", path);
+        }
+        if (in != nullptr) {
+            std::fclose(in);
+        }
+    }
+    return &id;
 }
 
 }  // extern "C"
