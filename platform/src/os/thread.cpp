@@ -13,7 +13,10 @@
 // which nothing else uses natively.
 
 #include <pthread.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <time.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdio>
@@ -88,12 +91,17 @@ constexpr int kMaxFrees = 4096;
 void* g_frees[kMaxFrees];
 int g_numFrees;
 std::atomic<int> g_freesPending;
+void (*g_gameFree)(void*);  // the game image's operator delete
+
+std::atomic<uint64_t> g_spinWaitNanos;  // SpinWaitNanos
 
 OSThread g_mainThread;
 
 thread_local OSThread* t_self;   // the game thread this host thread runs, if any
 thread_local bool t_gameCode;    // holds the baton, or delivers interrupts
 bool g_booted;
+
+OSThread g_mainThreadSaved;  // the default thread as the snapshot had it (reboot.cpp)
 
 // Thread queues, through OSThread::link (as the console's OS keeps them).
 void AddTail(OSThreadQueue* q, OSThread* t) {
@@ -385,7 +393,9 @@ void FlushFrees() {
         g_freesPending.store(g_numFrees, std::memory_order_release);
         pthread_mutex_unlock(&g_lock);
         for (int i = 0; i < n; i++) {
-            ::operator delete(batch[i]);
+            if (g_gameFree != nullptr) {
+                g_gameFree(batch[i]);
+            }
         }
     } while (n == 64);
 }
@@ -402,6 +412,20 @@ void* HostEntry(void* arg) {
     void* result = Native(t)->func(Native(t)->param);
     OSExitThread(result);
     return nullptr;
+}
+
+// Waits for the host thread an OSThread last ran on to end. A cancelled
+// thread only leaves when its host thread next wakes and sees `cancelled`, so
+// this has to come before the OSThread's native state is set up again
+// (InitThread): reset first, the old host thread would wait for a turn
+// forever.
+void JoinLastHost(OSThread* t) {
+    for (StackSlot& s : g_stacks) {
+        if (s.owner == t && s.joinable) {
+            pthread_join(s.host, nullptr);
+            s.joinable = false;
+        }
+    }
 }
 
 void StartHost(OSThread* t) {
@@ -426,9 +450,7 @@ void StartHost(OSThread* t) {
         std::fprintf(stderr, "frontline: too many game threads\n");
         std::abort();
     }
-    if (slot->joinable) {
-        pthread_join(slot->host, nullptr);  // the OSThread's last host thread has exited
-    }
+    JoinLastHost(t);
     pthread_attr_t attr;
     pthread_attr_init(&attr);
     pthread_attr_setstack(&attr, slot->stack, kStackSize);
@@ -483,12 +505,102 @@ inline void EnsureBoot() {
 }  // namespace
 
 void Lock() { pthread_mutex_lock(&g_lock); }
+
+void SetGameFree(void (*free)(void*)) { g_gameFree = free; }
+
+// Rebooting (reboot.cpp).
+
+void LeaveForReboot() {
+    pthread_mutex_lock(&g_lock);
+    g_running = nullptr;
+    t_gameCode = false;
+    pthread_mutex_unlock(&g_lock);
+    pthread_exit(nullptr);
+}
+
+void StopGameThreads() {
+    pthread_mutex_lock(&g_lock);
+    for (OSThread* t = g_active.head; t != nullptr; t = t->linkActive.next) {
+        Native(t)->cancelled = true;
+        pthread_cond_signal(&Native(t)->turn);
+    }
+    pthread_mutex_unlock(&g_lock);
+    // Threads that exited are in no list, and threads that never ran wait for
+    // their first turn: every host thread is in the stack slots.
+    for (StackSlot& s : g_stacks) {
+        if (s.joinable) {
+            pthread_mutex_lock(&g_lock);
+            if (s.owner != nullptr) {
+                Native(s.owner)->cancelled = true;
+                pthread_cond_signal(&Native(s.owner)->turn);
+            }
+            pthread_mutex_unlock(&g_lock);
+            pthread_join(s.host, nullptr);
+            s.joinable = false;
+        }
+    }
+}
+
+void ResetThreads() {
+    pthread_mutex_lock(&g_lock);
+    g_running = nullptr;
+    std::memset(g_runQueue, 0, sizeof(g_runQueue));
+    g_runMask = 0;
+    g_active.head = g_active.tail = nullptr;
+    g_idleInterrupts = true;
+    g_interruptDepth = 0;
+    g_rescheduleLater = false;
+    g_numFrees = 0;
+    g_freesPending.store(0);
+    for (StackSlot& s : g_stacks) {
+        s = {};
+    }
+    pthread_mutex_unlock(&g_lock);
+    pthread_mutex_lock(&g_queueLock);
+    g_interruptHead = 0;
+    g_pending.fetch_sub(g_interruptCount);
+    g_interruptCount = 0;
+    pthread_mutex_unlock(&g_queueLock);
+}
+
+void SaveMainThread() { g_mainThreadSaved = g_mainThread; }
+
+void RestartMainThread(int (*gameMain)()) {
+    pthread_mutex_lock(&g_lock);
+    g_mainThread = g_mainThreadSaved;
+    std::memset(&g_mainThread.context, 0, sizeof(g_mainThread.context));
+    NativeThread* n = new (Native(&g_mainThread)) NativeThread{};
+    pthread_cond_init(&n->turn, nullptr);
+    n->interrupts = true;
+    n->func = [](void* main) -> void* {
+        reinterpret_cast<int (*)()>(main)();
+        return nullptr;
+    };
+    n->param = reinterpret_cast<void*>(gameMain);
+    g_mainThread.state = OS_THREAD_STATE_RUNNING;
+    g_mainThread.queue = nullptr;
+    g_mainThread.link.next = g_mainThread.link.prev = nullptr;
+    AddActive(&g_mainThread);
+    g_running = &g_mainThread;
+    pthread_mutex_unlock(&g_lock);
+    StartHost(&g_mainThread);
+}
 void Unlock() { pthread_mutex_unlock(&g_lock); }
+
+uint64_t SpinWaitNanos() { return g_spinWaitNanos.load(std::memory_order_relaxed); }
 
 void RaiseInterrupt(InterruptFn fn, void* arg) {
     pthread_mutex_lock(&g_queueLock);
     if (g_interruptCount == kMaxInterrupts) {
         std::fprintf(stderr, "frontline: interrupt queue overflow (the game isn't reaching safe points)\n");
+        // Crash on the running game thread, so the report's backtrace shows
+        // where it's stuck.
+        if (OSThread* running = g_running) {
+            pthread_kill(Native(running)->host, SIGABRT);
+            for (;;) {
+                pause();
+            }
+        }
         std::abort();
     }
     g_interrupts[(g_interruptHead + g_interruptCount) % kMaxInterrupts] = {fn, arg};
@@ -548,6 +660,11 @@ void frontline::StartGame(int (*gameMain)()) {
         std::fprintf(stderr, "frontline: StartGame must run on the thread that ran the static initializers\n");
         std::abort();
     }
+    if (g_active.head != &g_mainThread || g_active.tail != &g_mainThread) {
+        std::fprintf(stderr, "frontline: the game's static initializers started threads; it can't reboot in place\n");
+        std::abort();
+    }
+    TakeSnapshot(gameMain);
     pthread_mutex_lock(&g_lock);
     Native(&g_mainThread)->func = [](void* main) -> void* {
         reinterpret_cast<int (*)()>(main)();
@@ -571,9 +688,11 @@ void NativeSpinWait(void) {
     if (t_self == nullptr || g_running != t_self) {
         return;
     }
+    uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
     pthread_mutex_lock(&g_lock);
     WaitForInterruptLocked(false);  // the caller's loop checks again
     pthread_mutex_unlock(&g_lock);
+    g_spinWaitNanos.fetch_add(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start, std::memory_order_relaxed);
     SafePoint();
 }
 
@@ -592,6 +711,7 @@ BOOL OSCreateThread(OSThread* thread, void* (*func)(void*), void* param, void* s
     if (priority < OS_PRIORITY_MIN || priority > OS_PRIORITY_MAX) {
         return FALSE;
     }
+    JoinLastHost(thread);
     InitThread(thread, func, param, priority, attr);
     // The game's own stack goes unused natively, but keeps its overflow marker.
     thread->stackBase = static_cast<u8*>(stack);

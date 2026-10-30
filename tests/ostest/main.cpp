@@ -207,6 +207,28 @@ void TestHeap() {
     EXPECT(OSAllocFromHeap(heap, 0xF000) != nullptr, "freed blocks didn't merge");
 }
 
+// A thread cancelled while it waits can be created again at once in the same
+// OSThread (the game restarts its sound driver this way): its old host thread
+// must be gone first, or the new one never starts.
+void TestCancelAndRecreate() {
+    static OSMessageQueue queue;
+    static OSMessage slot;
+    OSInitMessageQueue(&queue, &slot, 1);
+    alarm(10);  // a hang fails the test
+    for (int i = 0; i < 200; i++) {
+        Create(0, [](void*) -> void* {
+            OSMessage msg;
+            OSReceiveMessage(&queue, &msg, OS_MESSAGE_BLOCK);
+            return nullptr;
+        }, 20);
+        OSResumeThread(&g_threads[0]);
+        SleepMs(1);  // it runs, and waits for a message
+        EXPECT(g_threads[0].state == OS_THREAD_STATE_WAITING, "state %d", g_threads[0].state);
+        OSCancelThread(&g_threads[0]);
+    }
+    alarm(0);
+}
+
 int TestMain() {
     TestStackAddresses();
     TestValueRoundTrip();
@@ -216,6 +238,7 @@ int TestMain() {
     TestMessages();
     TestPeriodicAndDisable();
     TestMutexInheritance();
+    TestCancelAndRecreate();
     std::printf("ostest: %s (%d failures)\n", g_failures ? "FAILED" : "ok", g_failures);
     std::exit(g_failures ? 1 : 0);
 }

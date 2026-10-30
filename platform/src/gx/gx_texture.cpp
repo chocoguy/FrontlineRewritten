@@ -3,6 +3,8 @@
 
 #include "gx_texture.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace frontline::gx {
@@ -31,24 +33,29 @@ BlockSize Block(uint32_t format) {
     }
 }
 
+// Fewer bits to 8, as the texture unit widens them: the bits repeated.
+uint8_t Expand5(uint32_t v) { return (uint8_t)(v << 3 | v >> 2); }
+uint8_t Expand6(uint32_t v) { return (uint8_t)(v << 2 | v >> 4); }
+uint8_t Expand3(uint32_t v) { return (uint8_t)(v << 5 | v << 2 | v >> 1); }
+
 void Rgb565(uint16_t v, uint8_t* out) {
-    out[0] = (uint8_t)(((v >> 11) & 31) * 255 / 31);
-    out[1] = (uint8_t)(((v >> 5) & 63) * 255 / 63);
-    out[2] = (uint8_t)((v & 31) * 255 / 31);
+    out[0] = Expand5((v >> 11) & 31);
+    out[1] = Expand6((v >> 5) & 63);
+    out[2] = Expand5(v & 31);
     out[3] = 255;
 }
 
 void Rgb5a3(uint16_t v, uint8_t* out) {
     if (v & 0x8000) {
-        out[0] = (uint8_t)(((v >> 10) & 31) * 255 / 31);
-        out[1] = (uint8_t)(((v >> 5) & 31) * 255 / 31);
-        out[2] = (uint8_t)((v & 31) * 255 / 31);
+        out[0] = Expand5((v >> 10) & 31);
+        out[1] = Expand5((v >> 5) & 31);
+        out[2] = Expand5(v & 31);
         out[3] = 255;
     } else {
         out[0] = (uint8_t)(((v >> 8) & 15) * 17);
         out[1] = (uint8_t)(((v >> 4) & 15) * 17);
         out[2] = (uint8_t)((v & 15) * 17);
-        out[3] = (uint8_t)(((v >> 12) & 7) * 255 / 7);
+        out[3] = Expand3((v >> 12) & 7);
     }
 }
 
@@ -68,13 +75,15 @@ void Palette(const uint8_t* tlut, uint32_t tlutFormat, uint32_t index, uint8_t* 
     }
 }
 
-void Lerp(const uint8_t* a, const uint8_t* b, int wa, int wb, int div, uint8_t* out) {
+// (a * wa + b * wb) >> shift, each channel.
+void Lerp(const uint8_t* a, const uint8_t* b, int wa, int wb, int shift, uint8_t* out) {
     for (int i = 0; i < 4; i++) {
-        out[i] = (uint8_t)((a[i] * wa + b[i] * wb) / div);
+        out[i] = (uint8_t)((a[i] * wa + b[i] * wb) >> shift);
     }
 }
 
-// One 4x4 DXT1 sub-block of a CMPR block.
+// One 4x4 DXT1 sub-block of a CMPR block. The console puts the colors between
+// the two ends at 3/8 and 5/8, not DXT1's thirds (Dolphin's DXTBlend).
 void Cmpr(const uint8_t* src, uint8_t* dst, uint32_t stride, uint32_t x0, uint32_t y0, uint32_t width,
           uint32_t height) {
     uint16_t c0 = Be16(src), c1 = Be16(src + 2);
@@ -82,10 +91,10 @@ void Cmpr(const uint8_t* src, uint8_t* dst, uint32_t stride, uint32_t x0, uint32
     Rgb565(c0, colors[0]);
     Rgb565(c1, colors[1]);
     if (c0 > c1) {
-        Lerp(colors[0], colors[1], 2, 1, 3, colors[2]);
-        Lerp(colors[0], colors[1], 1, 2, 3, colors[3]);
+        Lerp(colors[0], colors[1], 5, 3, 3, colors[2]);
+        Lerp(colors[0], colors[1], 3, 5, 3, colors[3]);
     } else {
-        Lerp(colors[0], colors[1], 1, 1, 2, colors[2]);
+        Lerp(colors[0], colors[1], 1, 1, 1, colors[2]);
         colors[3][0] = colors[2][0], colors[3][1] = colors[2][1], colors[3][2] = colors[2][2];
         colors[3][3] = 0;
     }
@@ -99,6 +108,10 @@ void Cmpr(const uint8_t* src, uint8_t* dst, uint32_t stride, uint32_t x0, uint32
         }
     }
 }
+
+// The alpha the game's alpha-tested materials must pass (a > 160:
+// GXSetAlphaCompare in compartment.cpp and staticmesh.cpp).
+constexpr uint32_t kAlphaTestRef = 160;
 
 }  // namespace
 
@@ -175,6 +188,75 @@ void DecodeTexture(const uint8_t* src, uint32_t format, uint32_t width, uint32_t
                 }
             }
         }
+    }
+}
+
+uint32_t LinearLevelSize(uint32_t, uint32_t width, uint32_t height) { return width * height; }
+
+void DecodeLinearTexture(const uint8_t* src, uint32_t format, uint32_t width, uint32_t height, const uint8_t* tlut,
+                         uint32_t tlutFormat, uint8_t* out) {
+    for (uint32_t i = 0; i < width * height; i++, out += 4) {
+        if (format == kTexC8) {
+            Palette(tlut, tlutFormat, src[i], out);
+        } else {  // I8
+            out[0] = out[1] = out[2] = out[3] = src[i];
+        }
+    }
+}
+
+void Downsample(const uint8_t* src, uint32_t width, uint32_t height, uint8_t* dst) {
+    const uint32_t w = width > 1 ? width / 2 : 1, h = height > 1 ? height / 2 : 1;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint32_t y0 = std::min(y * 2, height - 1), y1 = std::min(y * 2 + 1, height - 1);
+        for (uint32_t x = 0; x < w; x++, dst += 4) {
+            const uint32_t x0 = std::min(x * 2, width - 1), x1 = std::min(x * 2 + 1, width - 1);
+            const uint8_t* p[4] = {src + (y0 * width + x0) * 4, src + (y0 * width + x1) * 4,
+                                   src + (y1 * width + x0) * 4, src + (y1 * width + x1) * 4};
+            const uint32_t alpha = p[0][3] + p[1][3] + p[2][3] + p[3][3];
+            for (int c = 0; c < 3; c++) {
+                dst[c] = alpha != 0 ? (uint8_t)((p[0][c] * p[0][3] + p[1][c] * p[1][3] + p[2][c] * p[2][3] +
+                                                 p[3][c] * p[3][3] + alpha / 2) /
+                                                alpha)
+                                    : (uint8_t)((p[0][c] + p[1][c] + p[2][c] + p[3][c] + 2) / 4);
+            }
+            dst[3] = (uint8_t)((alpha + 2) / 4);
+        }
+    }
+}
+
+float AlphaTestCoverage(const uint8_t* rgba, uint32_t texels) {
+    uint32_t passing = 0;
+    for (uint32_t i = 0; i < texels; i++) {
+        const uint8_t a = rgba[i * 4 + 3];
+        if (a > 8 && a < 247) {
+            return -1.0f;  // see-through in between: blended, not tested
+        }
+        passing += a > kAlphaTestRef;
+    }
+    return passing != 0 && passing != texels ? (float)passing / texels : -1.0f;
+}
+
+void KeepCoverage(uint8_t* rgba, uint32_t texels, float coverage) {
+    uint32_t histogram[256] = {};
+    for (uint32_t i = 0; i < texels; i++) {
+        histogram[rgba[i * 4 + 3]]++;
+    }
+    // The alpha at which the share passing matches: the texels at or above
+    // it are scaled to just pass.
+    const uint32_t want = std::max(1u, (uint32_t)std::lround(coverage * texels));
+    uint32_t above = 0, q = 255;
+    for (; q > 0; q--) {
+        above += histogram[q];
+        if (above >= want) {
+            break;
+        }
+    }
+    if (q == 0) {
+        return;
+    }
+    for (uint32_t i = 0; i < texels; i++) {
+        uint8_t& a = rgba[i * 4 + 3];
+        a = (uint8_t)std::min(255u, a * (kAlphaTestRef + 1) / q);
     }
 }
 

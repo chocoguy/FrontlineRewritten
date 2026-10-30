@@ -784,3 +784,12 @@ s32 CARDSetAttributes(s32 chan, s32 fileNo, u8 attr) {
 }
 
 }  // extern "C"
+
+// Rebooting (os/reboot.cpp): the cards stay in their slots, unmounted. Every
+// operation finishes before it returns, so nothing is in flight.
+void frontline::os::ResetCard() {
+    for (Card& card : g_cards) {
+        card.mounted = false;
+        card.result = CARD_RESULT_READY;
+    }
+}

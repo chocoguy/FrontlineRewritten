@@ -3,7 +3,9 @@
 //   frontline_headless <disc folder> [seconds] [dump folder|-] [buttons]
 // With a dump folder, the displayed frame is written there as a PPM image
 // every second. Buttons is a FRONTLINE_INPUT script for controller 1 (see
-// platform/src/pad.cpp): "5:A,8:START+1,12.5:A".
+// platform/src/pad.cpp): "5:A,8:START+1,12.5:A". FRONTLINE_HFR_RATE=<Hz>
+// shows the game as a screen refreshing that fast would (for the high frame
+// rate's FRONTLINE_PERF and FRONTLINE_HFR_DUMP).
 
 #include <unistd.h>
 
@@ -14,8 +16,6 @@
 
 #include "frontline/platform.h"
 #include "types.h"
-
-extern int FrontlineGameMain();
 
 namespace {
 
@@ -77,7 +77,16 @@ int main(int argc, char** argv) {
     }
     PADStatus pad = {};  // controller 1, connected
     frontline::SetPadState(0, pad);
-    frontline::StartGame(FrontlineGameMain);
+    // The game image the build made, or FRONTLINE_GAME_IMAGE=<path>.
+    const char* image = std::getenv("FRONTLINE_GAME_IMAGE");
+    frontline::GameMain gameMain = frontline::LoadGame(image != nullptr ? image : FRONTLINE_GAME_IMAGE);
+    if (gameMain == nullptr) {
+        return 1;
+    }
+    frontline::StartGame(gameMain);
+    if (const char* rate = std::getenv("FRONTLINE_HFR_RATE")) {
+        frontline::StartOffscreenDisplay(std::atof(rate));
+    }
     for (int i = 1; i <= seconds; i++) {
         sleep(1);
         frontline::DisplayedFrame f = frontline::GetDisplayedFrame();

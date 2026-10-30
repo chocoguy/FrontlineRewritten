@@ -27,7 +27,9 @@
 #include "dolphin/ai.h"
 #include "dolphin/ar.h"
 #include "dolphin/ax.h"
+#include "audio_limiter.h"
 #include "audio_out.h"
+#include "native/hooks.h"
 #include "os/os_internal.h"
 
 namespace {
@@ -71,6 +73,19 @@ int g_trace = -1;
 // The buses: main, aux A and aux B, each left, right and surround.
 enum { kMain, kAuxA, kAuxB };
 s32 g_bus[3][3][kFrameSamples];
+
+// Rewritten's limiter on the main mix (audio_limiter.h); FRONTLINE_LIMITER=off
+// keeps the DSP's clipping, for comparison.
+frontline::audio::Limiter g_limiter;
+u32 g_limitedFrames;
+
+bool LimiterOn() {
+    static const bool off = [] {
+        const char* env = std::getenv("FRONTLINE_LIMITER");
+        return env != nullptr && std::strcmp(env, "off") == 0;
+    }();
+    return !off && NativeGameMode() == NATIVE_MODE_REWRITTEN;
+}
 
 inline u32 Join(u16 hi, u16 lo) { return (u32)hi << 16 | lo; }
 
@@ -210,14 +225,26 @@ void RunFrame() {
         }
     }
     s16 frames[kFrameSamples][2];
-    for (int i = 0; i < kFrameSamples; i++) {
-        frames[i][0] = Clamp16(g_bus[kMain][0][i]);
-        frames[i][1] = Clamp16(g_bus[kMain][1][i]);
+    if (LimiterOn()) {
+        // Rewritten: a soft limiter instead of the DSP's hard clipping.
+        g_limiter.Process(g_bus[kMain][0], g_bus[kMain][1], frames, kFrameSamples);
+        if (g_limiter.Gain() < 1.0f) {
+            g_limitedFrames++;
+        }
+    } else {
+        for (int i = 0; i < kFrameSamples; i++) {
+            frames[i][0] = Clamp16(g_bus[kMain][0][i]);
+            frames[i][1] = Clamp16(g_bus[kMain][1][i]);
+        }
     }
     frontline::audio::Output(frames, kFrameSamples);
     static u32 count;
     if (g_trace > 0 && ++count % 2000 == 0) {
         frontline::audio::PrintStats();
+        if (LimiterOn()) {
+            std::fprintf(stderr, "[ax] limiter: %u of the last 2000 frames turned down\n", g_limitedFrames);
+            g_limitedFrames = 0;
+        }
     }
     if (g_userCallback != nullptr) {
         g_userCallback();
@@ -381,3 +408,17 @@ AXUserCallback AXRegisterCallback(AXUserCallback callback) {
 }
 
 }  // extern "C"
+
+// Rebooting (os/reboot.cpp): no voices or callbacks until AXInit, and ARAM's
+// allocations start over. The frame clock and the output keep running (they
+// play silence).
+void frontline::os::ResetAudio() {
+    g_axRunning = false;
+    std::memset(g_voices, 0, sizeof(g_voices));
+    std::memset(g_voiceUsed, 0, sizeof(g_voiceUsed));
+    g_auxA = nullptr;
+    g_auxAContext = nullptr;
+    g_userCallback = nullptr;
+    g_aramUsed = kAramBase;
+    g_limiter.Reset();
+}

@@ -4,23 +4,30 @@
 add_library(frontline_platform STATIC
     src/address.cpp
     src/audio.cpp
+    src/audio_limiter.cpp
     src/audio_out.cpp
     src/card.cpp
     src/dvd.cpp
     src/game_hooks.cpp
     src/gx/display.mm
+    src/gx/frame_motion.cpp
     src/gx/gx.cpp
     src/gx/gx_metal.mm
+    src/gx/gx_record.mm
     src/gx/gx_shader.cpp
     src/gx/gx_texture.cpp
     src/gx/gx_vertex.cpp
+    src/key_icons.mm
     src/mtx.cpp
     src/os/crash.cpp
     src/os/memory.cpp
     src/os/misc.cpp
+    src/os/reboot.cpp
     src/os/thread.cpp
     src/os/time.cpp
     src/pad.cpp
+    src/prompts.cpp
+    src/settings.cpp
     src/vi.cpp)
 
 target_include_directories(frontline_platform PUBLIC include)
@@ -37,6 +44,8 @@ target_compile_definitions(frontline_platform PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX
 target_include_directories(frontline_platform PRIVATE src)
 
 # The GX backend is Objective-C++ on Metal.
-set_source_files_properties(src/gx/display.mm src/gx/gx_metal.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+set_source_files_properties(src/gx/display.mm src/gx/gx_metal.mm src/gx/gx_record.mm
+    PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
 target_link_libraries(frontline_platform PUBLIC
-    "-framework AudioToolbox" "-framework Metal" "-framework QuartzCore" "-framework Foundation")
+    "-framework AudioToolbox" "-framework Metal" "-framework QuartzCore" "-framework Foundation"
+    "-framework CoreGraphics" "-framework CoreText")

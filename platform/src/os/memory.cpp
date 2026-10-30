@@ -54,6 +54,15 @@ constexpr int kMaxHeaps = 8;
 Heap g_heaps[kMaxHeaps];
 int g_numHeaps;
 
+// The heaps and bounds as the game's static initializers left them (reboot.cpp).
+struct Saved {
+    uint8_t* arenaLo;
+    uint8_t* arenaHi;
+    Heap heaps[kMaxHeaps];
+    int numHeaps;
+    OSHeapHandle currHeap;
+} g_saved;
+
 Cell* Unlink(Cell* list, Cell* cell) {
     if (cell->next != nullptr) {
         cell->next->prev = cell->prev;
@@ -220,3 +229,27 @@ void OSFreeToHeap(OSHeapHandle handle, void* ptr) {
 }
 
 }  // extern "C"
+
+namespace frontline::os {
+
+void SaveMemoryState() {
+    InitArena();
+    g_saved.arenaLo = g_arenaLo;
+    g_saved.arenaHi = g_arenaHi;
+    std::memcpy(g_saved.heaps, g_heaps, sizeof(g_heaps));
+    g_saved.numHeaps = g_numHeaps;
+    g_saved.currHeap = __OSCurrHeap;
+}
+
+void RestoreMemoryState() {
+    g_arenaLo = g_saved.arenaLo;
+    g_arenaHi = g_saved.arenaHi;
+    std::memcpy(g_heaps, g_saved.heaps, sizeof(g_heaps));
+    g_numHeaps = g_saved.numHeaps;
+    __OSCurrHeap = g_saved.currHeap;
+    // The stacks come again from the top (the arena's pages, guards included,
+    // are new).
+    g_stackTop = static_cast<uint8_t*>(ArenaHi());
+}
+
+}  // namespace frontline::os

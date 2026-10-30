@@ -24,6 +24,7 @@
 #include "aems.h"
 #include "check.h"
 #include "font.h"
+#include "messages.h"
 #include "mpf.h"
 #include "scr.h"
 #include "viv.h"
@@ -556,6 +557,16 @@ int main(int argc, char** argv) {
     }
     std::printf("gfn: %ld fonts (%ld wide), %ld characters, %ld kern pairs\n", fontStats.fonts, fontStats.wide,
                 fontStats.chars, fontStats.kerns);
+    MessageStats messageStats;
+    auto read = [](const fs::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)), {});
+    };
+    if (!CheckMessages(read(data / "chars.bum"), read(data / "binum.bum"), messageStats)) {
+        std::printf("  in chars.bum\n");
+    }
+    std::printf("bum: %ld user messages, %ld rewritten for the keyboard (%ld \"Press ACTION\")\n",
+                messageStats.messages, messageStats.rewritten, messageStats.pressAction);
     std::printf("mpf: %ld music maps (%ld legacy skipped), %ld nodes, %ld branches, %ld waves, %ld fade curves, %ld remap pairs\n",
                 mpfStats.maps, mpfStats.legacy, mpfStats.nodes, mpfStats.branches, mpfStats.waves, mpfStats.fades, mpfStats.remaps);
     std::printf("%s (%d failures)\n", g_failures ? "FAILED" : "ok", g_failures);

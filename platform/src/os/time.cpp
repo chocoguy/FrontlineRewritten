@@ -207,3 +207,11 @@ void OSCancelAlarm(OSAlarm* alarm) {
 }
 
 }  // extern "C"
+
+void frontline::os::ResetAlarms() {
+    Lock();
+    g_alarmHead = nullptr;
+    g_alarmInterruptQueued = false;
+    Unlock();
+    WakeClock();
+}

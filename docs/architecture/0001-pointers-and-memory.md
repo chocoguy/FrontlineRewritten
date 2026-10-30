@@ -85,3 +85,12 @@ The plan above held up. Implementing it changed four details:
 - **Data viewed with a GameCube object layout is copied.** Location collision boxes and a static mesh's root node are `CVolBox` images in file data, with a 4-byte vtable slot. Natively, `GCVolBox()` in `box.h` builds a real `CVolBox` from those bytes.
 - **Console-sized space that holds native objects is sized natively.** Objects are placement-built into byte arrays sized for the console (a mesh in a 16-byte template slot), at fixed offsets inside other objects (a soldier's AI filter at `+0x44B0`), or in pools whose element sizes are literals. Natively the buffer, offset or pool size becomes `sizeof` the real object (`GC_SIZE`, or an `#ifdef` with the size), and the slot that holds both grows to fit.
 - **MWCC can put a class's vtable pointer after data members.** `BSGO_Basic`'s is at `0xC`, after its three members; clang always puts it first. Code that reads "the first word of the object" (`BSGO_Basic`'s script object) gets a native accessor.
+
+## Revisions from Phase 2
+
+- **The game is an image of its own, and the map has two images (2026-10-30).** The game (the decomp's units and `game/native/`) is built as `FrontlineGame.so`, a Mach-O bundle the executable loads at start (`frontline::LoadGame`), so it can be rebooted in place between levels (0002). So the image range is two:
+  - `[0x80000000, +game image)`: the game's image, which `native/address.h`'s fast paths cover;
+  - then, 64 KB aligned, the image holding the platform layer: the game keeps pointers to its statics too (the default thread's `OSThread`, for one). Only the slow paths look there.
+  - The map finds the game image by its path as its static initializers run, since they already store pointers.
+- **The game's `operator new` and `delete` are the game image's alone.** The platform layer, the app and Apple's frameworks keep the system allocator on every thread (before, platform code on a game thread got the game's heap). Game memory freed on a host thread goes back through the image's own delete (`FrontlineGameFree`).
+

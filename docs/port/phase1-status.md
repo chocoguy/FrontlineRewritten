@@ -71,6 +71,7 @@ Hand-maintained. The generated compile and link work list is [build-errors.md](b
 | Reads past a buffer that the console tolerates | The memory card header writes send two sectors from a one-sector buffer (stack or static); on the console the extra sector is harmless leftovers, natively the read ran off the top of the game thread's stack. The buffers cover both sectors natively |
 | Big-endian data read in place | Stream chunk fields, PCM16 samples and XA packet state (read big-endian natively, not swapped) |
 | Integers carried in pointers | Script branch offsets (signed), event data, animation state arguments. Pointers below 4 GB pass through `PTR_TO_ADDR` unchanged, since macOS maps nothing there |
+| `unsigned long` holding a 32-bit id | `unsigned long` is 32 bits on the GameCube but 64 natively, and the headers keep it wherever the retail symbols have it. The light and particle lookups by id (`CLight::Create`, `CParticleSystem::Create`) took one, and the script built-ins pass them a signed `int`, so an id with the top bit set sign-extended to `0xFFFFFFFF........` and never matched the table's 32-bit id. An alarm's flashing light came back NULL and crashed as soon as a soldier raised the alarm (The Golden Lion, Eye of the Storm, A Chance Meeting), and 646 of the 1,620 particle effect calls in the levels' scripts never appeared. They take `u32` now, which is `unsigned long` on the GameCube, so nothing changes there. Grep for `unsigned long` parameters given an `int` and compared with a `u32` |
 | Tags with default addresses | `NULL + value` in the sound patch parser |
 
 **Tools:**
@@ -91,7 +92,7 @@ Hazards are found by reading code, so expect more as the game starts running. `b
 
 ## Next
 
-1. Mouse look for keyboard play (Phase 3 polish, unless playtesting needs it sooner).
+1. ~~Mouse look for keyboard play~~: done in Phase 2 ([phase2-status.md](phase2-status.md)).
 2. Play further (whole levels, every stage) and fix what turns up; compare rendering with Dolphin.
 3. Extend `tests/datacheck` to the little-endian formats above.
-4. Sound polish: the mixer's 5 ms clock and the output device's drift apart slowly; the buffer covers it with a short gap or drop now and then (none seen in 75 s). The DSP's polyphase resampling is approximated as linear, and the surround and aux B buses aren't output (the game uses stereo and aux A). The mix overloads (hard clipping) when loud effects land on top of music and dialogue, on the beach in D-Day; that is the game's own mix summed as the DSP does, so Classic keeps it, and a soft limiter is planned for Rewritten mode (ROADMAP, Phase 3).
+4. Sound polish: the mixer's 5 ms clock and the output device's drift apart slowly; the buffer covers it with a short gap or drop now and then (none seen in 75 s). The DSP's polyphase resampling is approximated as linear, and the surround and aux B buses aren't output (the game uses stereo and aux A). The mix overloads (hard clipping) when loud effects land on top of music and dialogue, on the beach in D-Day; that is the game's own mix summed as the DSP does, so Classic keeps it, and a soft limiter is planned for Rewritten mode (ROADMAP, Phase 2).

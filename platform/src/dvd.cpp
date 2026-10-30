@@ -51,8 +51,10 @@ constexpr int kMaxReads = 64;
 Read g_reads[kMaxReads];
 u32 g_seq;
 int g_inFlight;
+bool g_reading;  // the worker is reading, or has yet to raise the read's interrupt
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t g_work = PTHREAD_COND_INITIALIZER;
+pthread_cond_t g_idle = PTHREAD_COND_INITIALIZER;  // g_reading went false
 
 void Add(const char* path, const char* host, u32 size) {
     if (g_numEntries == g_capacity) {
@@ -137,6 +139,7 @@ void* Worker(void*) {
         void* addr = next->addr;
         s32 length = next->length;
         s32 offset = next->offset;
+        g_reading = true;
         pthread_mutex_unlock(&g_lock);
         s32 result = -1;
         if (e.fd >= 0) {
@@ -153,6 +156,8 @@ void* Worker(void*) {
         pthread_mutex_unlock(&g_lock);
         frontline::os::RaiseInterrupt(Complete, next);
         pthread_mutex_lock(&g_lock);
+        g_reading = false;
+        pthread_cond_broadcast(&g_idle);
     }
     return nullptr;
 }
@@ -301,3 +306,23 @@ DVDDiskID* DVDGetCurrentDiskID(void) {
 }
 
 }  // extern "C"
+
+// Rebooting (os/reboot.cpp): reads not started are dropped, and the one being
+// read finishes first (its interrupt is then queued, and dropped with the
+// rest). The file list and open files stay.
+void frontline::os::ResetDvd() {
+    pthread_mutex_lock(&g_lock);
+    for (Read& r : g_reads) {
+        if (r.result == INT32_MIN) {
+            r.used = false;  // (the one being read too: the worker is done with its flag)
+        }
+    }
+    while (g_reading) {
+        pthread_cond_wait(&g_idle, &g_lock);
+    }
+    for (Read& r : g_reads) {
+        r = {};
+    }
+    g_inFlight = 0;
+    pthread_mutex_unlock(&g_lock);
+}

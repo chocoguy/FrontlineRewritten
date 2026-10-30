@@ -43,7 +43,7 @@ On a multi-core Mac, real threads running freely would turn all of this into dat
 
 - The emulated video retrace ticks at NTSC's 60000/1001 Hz. It's derived from `mach_absolute_time`, never from the display's refresh. The game counts whole retraces, so a 120 Hz ProMotion screen can't speed it up (gotcha 5).
 - `OSGetTime`/`OSGetTick` count at the GameCube timer's 40.5 MHz (bus clock ÷ 4), from the same clock. The 44 places that convert ticks keep working unchanged.
-- Rendering at higher frame rates (Phase 3) means drawing interpolated frames, not running the simulation faster.
+- Rendering at higher frame rates (Phase 2) means drawing interpolated frames, not running the simulation faster.
 
 ## Rejected
 
@@ -62,6 +62,17 @@ Implemented in `platform/src/os/` as planned, with these details:
 - **Spin-waits use `SPIN_WAIT()`** (`types.h`): it sleeps until an interrupt is raised and delivers it, keeping the baton as the spinning CPU would. Found so far: `CScreen::Wait`, `FILESYS_waitop`, the one-shot sound bank wait, the animation DMA wait.
 - **Retraces, alarms, disc reads and audio frames each have a host thread** that only raises interrupts.
 - `tests/ostest` checks the scheduler: priorities, preemption, blocking queues, mutex priority inheritance, alarms while idle, and delivery held back while interrupts are disabled. It's clean under the Thread Sanitizer.
+
+## Revisions from Phase 2
+
+- **The display runs on its own clock (2026-10-27).** The app presents from a `CAMetalDisplayLink` on a thread of its own, at the screen's refresh rate up to 120 Hz, in both modes. Each present shows the latest latched frame, so a new frame reaches a fast screen sooner; in Classic nothing else changes.
+- **Retrace times are exact.** Retrace n is due n × 1001/60 ms after the clock started. The displayed frame carries that time (`DisplayedFrame::latchTime`), read together with its frame buffer.
+- **Frames between the game's are replays, as planned (Rewritten's high frame rate).** The GX layer records each frame's draws instead of drawing them. The display draws the record for every refresh, with the camera moved on to that refresh's time. The game's own drawing never runs twice: it moves the game on (bones, random numbers, timers). See [High frame rate](../port/phase2-status.md#high-frame-rate-rewritten).
+- **The game reboots in place between levels (2026-10-30).** The console boots a stub that boots the game again (`LoadElf::RunModule`); this used to re-exec the process, which lost the window, fullscreen, focus and the compiled pipelines. Now (`platform/src/os/reboot.cpp`):
+  - `StartGame` takes a snapshot first: the game image's writable segments, the arena's non-zero pages (about 2 MB and 1.4 MB), the OS heaps and arena bounds, and the default thread's `OSThread`.
+  - `RunModule`'s thread leaves without handing the baton on and a host thread does the rest: it cancels and joins every game thread (each leaves at its next turn), drops the work host threads have in flight (DVD reads finish first; ARAM, alarms, VI and PAD callbacks, AX voices go), flushes the interrupts, maps fresh arena pages and copies the snapshot back, and starts `main()` on a new default thread.
+  - The retrace, alarm, audio and disc host threads keep running; the display shows black meanwhile (the game set `VISetBlack` before leaving).
+  - `FRONTLINE_RESTART_EXEC=1` re-execs as before; `FRONTLINE_REBOOT_TRACE=1` times each reboot.
 
 ## Consequences
 

@@ -6,13 +6,10 @@
 
 namespace frontline::gx {
 
-// A vertex as the TEV shader gets it.
-struct Vertex {
-    float pos[4];  // clip space (Metal conventions)
-    float color[2][4];
-    float tex[8][4];  // s, t, q
-    float pad[4];
-};
+// A vertex as the TEV shader gets it (gx_shader.cpp), in floats: the position
+// in clip space (Metal conventions), two colors, then the generated texture
+// coordinates, three each (s, t, q). kVertexBase + 3 * numTexGens in all.
+constexpr uint32_t kVertexBase = 12;
 
 // Draws `count` vertices of primitive `prim` (0x80 quads .. 0xB8 points) in
 // vertex format `fmt` from a big-endian stream (a display list or the
@@ -26,6 +23,7 @@ uint32_t VertexSize(uint32_t fmt);
 void RunDisplayList(const uint8_t* list, uint32_t size);
 
 // The backend (gx_metal.mm).
-void SubmitTriangles(const Vertex* vertices, uint32_t numVertices, const uint32_t* indices, uint32_t numIndices);
+void SubmitTriangles(const float* vertices, uint32_t stride, uint32_t numVertices, const uint16_t* indices,
+                     uint32_t numIndices);
 
 }  // namespace frontline::gx

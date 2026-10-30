@@ -109,8 +109,8 @@ struct Scratch {
         return data;
     }
 };
-Scratch<Vertex> g_vertices;
-Scratch<uint32_t> g_indices;
+Scratch<float> g_vertices;
+Scratch<uint16_t> g_indices;  // a draw has at most 65535 vertices
 
 const uint8_t* AttrData(uint32_t attr, const uint8_t*& p, uint32_t desc) {
     if (desc == 1) {
@@ -276,7 +276,9 @@ void LightChannel(const ChanCtrl& ctrl, int chan, bool alpha, const float eyePos
     }
 }
 
-void Transform(const RawVertex& rv, Vertex& out) {
+// Transforms and lights a vertex into `out` (gx_vertex.h's layout), with
+// `numTexGens` texture coordinates.
+void Transform(const RawVertex& rv, uint32_t numTexGens, float* out) {
     const State& s = g_state;
     const float* m = &s.xfMtx[(rv.posMtx & 63) * 4];
     float eye[3];
@@ -290,21 +292,23 @@ void Transform(const RawVertex& rv, Vertex& out) {
     }
     // Projection: z' / w lands in [-1, 0] near to far; Metal wants [0, 1].
     const float* p = s.projection;
+    float* pos = out;
     if (p[0] == 0.0f) {  // perspective
-        out.pos[0] = p[1] * eye[0] + p[2] * eye[2];
-        out.pos[1] = p[3] * eye[1] + p[4] * eye[2];
-        out.pos[2] = p[5] * eye[2] + p[6];
-        out.pos[3] = -eye[2];
+        pos[0] = p[1] * eye[0] + p[2] * eye[2];
+        pos[1] = p[3] * eye[1] + p[4] * eye[2];
+        pos[2] = p[5] * eye[2] + p[6];
+        pos[3] = -eye[2];
     } else {
-        out.pos[0] = p[1] * eye[0] + p[2];
-        out.pos[1] = p[3] * eye[1] + p[4];
-        out.pos[2] = p[5] * eye[2] + p[6];
-        out.pos[3] = 1.0f;
+        pos[0] = p[1] * eye[0] + p[2];
+        pos[1] = p[3] * eye[1] + p[4];
+        pos[2] = p[5] * eye[2] + p[6];
+        pos[3] = 1.0f;
     }
-    out.pos[2] += out.pos[3];
+    pos[2] += pos[3];
 
+    float* colors = out + 4;  // color0, color1
     for (int c = 0; c < 2; c++) {
-        float* color = out.color[c];
+        float* color = colors + c * 4;
         if ((uint32_t)c < s.numChans) {
             LightChannel(s.chan[c], c, false, eye, nrm, rv, color);
             LightChannel(s.chan[c + 2], c, true, eye, nrm, rv, color);
@@ -313,13 +317,9 @@ void Transform(const RawVertex& rv, Vertex& out) {
         }
     }
 
-    for (uint32_t t = 0; t < 8; t++) {
-        float* tc = out.tex[t];
-        if (t >= s.numTexGens) {
-            tc[0] = tc[1] = 0.0f;
-            tc[2] = 1.0f;
-            continue;
-        }
+    // Coordinates past numTexGens aren't stored: the shader reads (0, 0, 1).
+    for (uint32_t t = 0; t < numTexGens; t++) {
+        float* tc = out + kVertexBase + t * 3;
         const TexGen& g = s.texGen[t];
         float src[4] = {0.0f, 0.0f, 1.0f, 1.0f};
         if (g.src == 0) {
@@ -331,10 +331,10 @@ void Transform(const RawVertex& rv, Vertex& out) {
         } else if (g.src >= 12 && g.src <= 18) {  // TEXCOORD0..6 (the movie player's)
             src[0] = rv.tex[g.src - 12][0], src[1] = rv.tex[g.src - 12][1];
         } else if (g.src == 19 || g.src == 20) {
-            src[0] = out.color[g.src - 19][0], src[1] = out.color[g.src - 19][1];
+            src[0] = colors[(g.src - 19) * 4], src[1] = colors[(g.src - 19) * 4 + 1];
         }
         if (g.func == 10) {  // SRTG: color0's red and green
-            tc[0] = out.color[0][0], tc[1] = out.color[0][1], tc[2] = 1.0f;
+            tc[0] = colors[0], tc[1] = colors[1], tc[2] = 1.0f;
             continue;
         }
         uint32_t mtx = g.func == 0 || g.func == 1 ? (g.mtx == 60 ? 60 : g.mtx) : 60;
@@ -393,16 +393,18 @@ uint32_t VertexSize(uint32_t fmt) {
 
 uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) {
     fmt &= 7;
-    Vertex* verts = g_vertices.Get(count);
+    const uint32_t numTexGens = g_state.numTexGens < 8 ? g_state.numTexGens : 8;
+    const uint32_t stride = kVertexBase + numTexGens * 3;
+    float* verts = g_vertices.Get(count * stride);
     const uint8_t* p = data;
     for (uint32_t i = 0; i < count; i++) {
         RawVertex rv;
         p = Decode(p, fmt, rv);
-        Transform(rv, verts[i]);
+        Transform(rv, numTexGens, verts + i * stride);
     }
     uint32_t consumed = (uint32_t)(p - data);
 
-    uint32_t* idx = g_indices.Get(count * 3 + 6);
+    uint16_t* idx = g_indices.Get(count * 3 + 6);
     uint32_t n = 0;
     switch (prim & 0xF8) {
     case 0x80:  // quads
@@ -441,7 +443,7 @@ uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) 
     }
     }
     if (n != 0) {
-        SubmitTriangles(verts, count, idx, n);
+        SubmitTriangles(verts, stride, count, idx, n);
     }
     return consumed;
 }

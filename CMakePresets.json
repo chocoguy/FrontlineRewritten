@@ -16,10 +16,20 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/ninja",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+    {
+      "name": "release",
+      "displayName": "Ninja (optimized)",
+      "description": "Optimized build with debug info, for playing, benchmarks and Instruments",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
     }
   ],
   "buildPresets": [
     { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" },
-    { "name": "ninja", "configurePreset": "ninja" }
+    { "name": "xcode-release", "configurePreset": "xcode", "configuration": "RelWithDebInfo" },
+    { "name": "ninja", "configurePreset": "ninja" },
+    { "name": "release", "configurePreset": "release" }
   ]
 }

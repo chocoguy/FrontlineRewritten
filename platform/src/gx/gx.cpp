@@ -266,6 +266,11 @@ void GXInitTexObjLOD(GXTexObj* obj, u32 minFilt, u32 magFilt, f32, f32 maxLod, f
         t->maxLod = lod < t->maxLod ? lod : t->maxLod;
     }
 }
+extern "C" void NativeLinearTexture(void* obj) {
+    TexObj* t = static_cast<TexObj*>(obj);
+    t->linear = 1;
+    t->minFilter = t->magFilter = 1;
+}
 u16 GXGetTexObjWidth(GXTexObj* obj) { return reinterpret_cast<TexObj*>(obj)->width; }
 u16 GXGetTexObjHeight(GXTexObj* obj) { return reinterpret_cast<TexObj*>(obj)->height; }
 u32 GXGetTexObjFmt(GXTexObj* obj) { return reinterpret_cast<TexObj*>(obj)->format; }

@@ -92,7 +92,8 @@ struct TexObj {
     uint8_t isCI;
     uint8_t minFilter, magFilter;
     uint8_t maxLod;
-    uint32_t tlut;  // TLUT name
+    uint8_t linear;  // rows of texels, not blocks (NativeLinearTexture)
+    uint32_t tlut;   // TLUT name
 };
 static_assert(sizeof(TexObj) <= sizeof(GXTexObj));
 

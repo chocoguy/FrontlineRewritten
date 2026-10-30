@@ -27,9 +27,9 @@ A native port of Medal of Honor: Frontline (GameCube, `GMFE69`) to macOS, iOS/iP
 - Classic is the default path. A Rewritten change is opt-in at run time and leaves the Classic path unchanged, so Classic can always be checked against the GameCube build and Dolphin.
 - One switch, read at run time, picks the mode. Native-only code checks it, so both modes ship in one build. A Rewritten change in the shared game source goes under `FRONTLINE_NATIVE` like other native code, and the GameCube build doesn't see it.
 - Keep each Rewritten change small and in one place, behind that switch, rather than forking whole files.
-- The mode is chosen per game, and saves remember it. A multiplayer session runs everyone in the same mode.
+- The mode is chosen on the app's setup screen at launch and holds for the whole run (decided 2026-10-25, replacing "chosen per game, saved with it"). A multiplayer session runs everyone in the same mode.
 
-Which phase builds what: Phase 1 is Classic. Phases 3–5 add mostly Rewritten features, and each one names the mode it belongs to.
+Which phase builds what: Phase 1 is Classic. Phases 2, 4 and 5 add mostly Rewritten features, and each one names the mode it belongs to.
 
 The game code in `FrontlineDecompiled/` is already finished: all 558 units build from source as functionally equivalent C/C++. So this roadmap doesn't start with decompiling. It starts with making that code run on 64-bit, little-endian Apple hardware.
 
@@ -63,10 +63,9 @@ Effort is relative: S, M, L, XL.
   - Decisions: [docs/architecture/](docs/architecture/README.md).
 
 ### Phase 1 — MVP: macOS with Metal (XL, the critical path)
-- **Status: in progress.**
-  - Every game unit compiles natively, and the GameCube build is unchanged.
-  - Collision, level geometry and mesh loaders are verified against the disc.
-  - Next: the platform layer. See [docs/port/phase1-status.md](docs/port/phase1-status.md).
+- **Status: done (2026-10-25).**
+  - The game runs natively in a macOS window from your disc: movies, menus and every mission, with sound and memory card saves. The GameCube build is unchanged.
+  - Some game behavior issues remain; playing through with mouse and keyboard (Phase 2) will list them. See [docs/port/phase1-status.md](docs/port/phase1-status.md).
 1. **Portability pass:**
    - per-platform integer types
    - pointer casts → `uintptr_t`
@@ -90,25 +89,33 @@ Effort is relative: S, M, L, XL.
 4. **macOS app shell:** SwiftUI with a Metal layer, a disc-folder picker with a hash check, and settings.
 - **Done when:** every mission can be finished, split-screen works, and side-by-side screenshots against Dolphin running the GameCube build look clean.
 
-### Phase 2 — iPhone, iPad and Apple TV (M)
+### Phase 2 — Enhancements (L)
+Rewritten mode unless marked otherwise.
+- **Status: in progress** (started 2026-10-25). See [docs/port/phase2-status.md](docs/port/phase2-status.md).
+- **Mouse and keyboard (both modes; done 2026-10-25):** the keyboard and mouse send game actions rather than GameCube buttons, so they work with any controller layout picked in the game's options. The mouse turns the view directly instead of faking stick input.
+- **The mode switch (done 2026-10-25):** Classic or Rewritten on the setup screen at launch, with Rewritten's picture settings; `NativeGameMode()` in the game.
+- **Enemy AI:** enhanced soldier AI (flanking, use of cover, grenade awareness), built on the decompiled `AISoldierObject`.
+  - The soldiers' decisions are level scripts (`SoldierA_Roamer`); the engine layer they call is done (2026-10-26): sight, aim, cover scoring, grenades and a squad director, scaled by difficulty in every Rewritten level. See [Enemy AI](docs/port/phase2-status.md#enemy-ai-rewritten-done-not-yet-playtested).
+  - The scripts' own decisions are biased by profile too (2026-10-26): charging, hiding and firing from cover, giving up, running from grenades. They were found with `tools/bsdis.py`, a disassembler for the compiled scripts.
+  - Next: playtesting and tuning.
+- **Audio:** a soft limiter on the output instead of hard clipping (done 2026-10-30).
+- **Widescreen (done 2026-10-25):** done in `CCamera` so the field of view, culling, weapon model and HUD all agree. Levels only; menus and movies stay 4:3.
+- **Image quality:** render resolution up to 4K (done 2026-10-25); 4x MSAA with alpha to coverage, made mipmaps with trilinear and anisotropic filtering, and smooth movies (done 2026-10-27); MetalFX to come.
+- **Frame rate:** locked 60 fps (reached 2026-10-26 in both modes, up to 4K at 21:9: an optimized build, CPU/GPU overlap and specialized TEV shaders; see [Performance](docs/port/phase2-status.md#performance-both-modes)).
+  - **Up to 120 Hz: experimental, on the back burner (2026-10-27).** Tried on a 120 Hz monitor: smoother, but not working as expected (stutters, edge pop-in on fast turns); left in as an opt-in Rewritten setting. the game still runs at 59.94. The display draws the frames in between from the GX draws it recorded, with the camera carried on and turned by the mouse's latest movement. See [High frame rate](docs/port/phase2-status.md#high-frame-rate-rewritten).
+  - Next: characters and props moving between frames too (they step at 60 now).
+- **Controls:** key remapping (done 2026-10-30, both modes: the playing actions, two keys or mouse buttons each) and gyro aim.
+- **Audio:** 48 kHz and spatial audio.
+- **Textures:** HD texture replacement. Using Dolphin's texture-hash naming means existing Dolphin packs would load.
+- **Visuals and quality of life:** longer draw distance (done 2026-10-27: 2x or 4x the level's far plane and fog), a field of view setting (done 2026-10-30: 70° to 110°, live), skippable intros, checkpoint restart.
+- **Platform quality of life (both modes, done 2026-10-30):** the game pauses when the app goes to the background, and the display stays awake while it runs.
+- **Optional:** move the world and character rendering off the GameCube-style path onto a modern Metal renderer, for per-pixel lighting and shadows.
+
+### Phase 3 — iPhone, iPad and Apple TV (M)
 - Same game code, new app shells.
 - **Controls:** touch controls and gyro on iPhone; game controllers everywhere.
 - **Getting the game data on:** import it through the Files app on iOS. On tvOS, bundle the ~1.3 GB of disc data into the app at build time.
 - **System integration:** frame pacing with `CAMetalDisplayLink`, handling interruptions and backgrounding, safe areas and TV overscan, and MetalFX (Apple's upscaler) where available.
-
-### Phase 3 — Enhancements (L)
-Rewritten mode unless marked otherwise.
-- **The mode switch:** a Classic/Rewritten choice when starting a game, saved with it. Build this before the first Rewritten feature.
-- **Enemy AI:** enhanced soldier AI (flanking, use of cover, grenade awareness), built on the decompiled `AISoldierObject`.
-- **Audio:** a soft limiter on the output instead of hard clipping.
-- **Widescreen:** done in `CCamera` so the field of view, culling, weapon model and HUD all agree.
-- **Image quality:** native resolution, anti-aliasing (MSAA), anisotropic filtering, MetalFX.
-- **Frame rate:** locked 60 fps, then 120 Hz on ProMotion screens.
-- **Controls:** remapping and gyro aim. Real mouse aim feeds camera rotation directly instead of faking stick input.
-- **Audio:** 48 kHz and spatial audio.
-- **Textures:** HD texture replacement. Using Dolphin's texture-hash naming means existing Dolphin packs would load.
-- **Visuals and quality of life:** longer draw distance, skippable intros, checkpoint restart.
-- **Optional:** move the world and character rendering off the GameCube-style path onto a modern Metal renderer, for per-pixel lighting and shadows.
 
 ### Phase 4 — Mods and sandbox (L)
 The game's own cheats belong to Classic; everything new here is Rewritten.
@@ -190,7 +197,7 @@ The original split-screen modes are Classic. LAN, bots and co-op are Rewritten a
 3. **"Play against AI":** deathmatch bots, co-op campaign, or both. This sets the order within Phase 5.
 4. **Internet play:** if it's a must-have someday, revisit lockstep vs. client–server before Phase 5.
 5. **Device floor:** keep the core renderer on baseline Metal features so older Apple TVs work, and switch on extras like MetalFX only where the device supports them.
-6. **Image quality in Classic:** whether settings that only sharpen the picture (native resolution, anti-aliasing, anisotropic filtering, 60 fps where the original drops frames) may be turned on in Classic, or are Rewritten only. Strict Classic keeps the original 640×448 picture.
+6. ~~**Image quality in Classic**~~ **Decided (2026-10-25):** Classic keeps the original 640×448 picture at 4:3; resolution, widescreen and other picture settings are Rewritten only.
 
 ## References
 - [aurora (GitHub)](https://github.com/encounter/aurora)

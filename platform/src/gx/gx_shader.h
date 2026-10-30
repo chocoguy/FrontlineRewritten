@@ -27,7 +27,20 @@ struct FragUniforms {
     // coordinate uses that size.
     float coordSize[8][4];
     uint32_t numIndStages;
-    uint32_t pad[3];
+    uint32_t alphaCoverage;  // the alpha test as alpha to coverage (gx_metal.mm AlphaCoverage)
+    uint32_t pad[2];
+};
+
+// The vertex shader's (gx_shader.cpp VertexUniforms, which says what they
+// mean). Mode 0 draws the recorded positions as they are.
+struct VertexUniforms {
+    uint32_t stride;
+    uint32_t numTexGens;
+    uint32_t mode;
+    uint32_t pad;
+    float from[8];
+    float zoom[4];
+    float move[3][4];
 };
 
 extern const char kShaderSource[];
