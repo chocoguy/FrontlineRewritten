@@ -80,5 +80,6 @@ void ResetDvd();
 void ResetCard();
 void ResetAudio();
 void ResetGx();
+void ResetMeshes();  // the Modern renderer's (mesh/mesh.cpp), after ResetGx
 
 }  // namespace frontline::os

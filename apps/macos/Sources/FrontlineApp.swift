@@ -79,6 +79,10 @@ enum Game {
         FrontlineSetHighFrameRate(defaults.bool(forKey: Settings.highFrameRate))
         FrontlineSetMsaa(Int32(Settings.msaa(defaults)))
         FrontlineSetDrawDistance(Float(Settings.drawDistance(defaults)))
+        FrontlineSetModernRenderer(defaults.bool(forKey: Settings.modernRenderer))
+        FrontlineSetCorrectedLighting(defaults.bool(forKey: Settings.correctedLighting))
+        FrontlineSetBlobShadows(defaults.bool(forKey: Settings.blobShadows))
+        FrontlineSetUnfairAI(defaults.bool(forKey: Settings.unfairAI))
         Input.publishKeyLabels()
         guard FrontlineStart(disc, MemoryCard.folder()) else {
             let alert = NSAlert()

@@ -85,17 +85,6 @@ void ReadColor(const uint8_t* p, uint32_t type, float out[4]) {
     out[3] = a / 255.0f;
 }
 
-// A decoded vertex, before transform.
-struct RawVertex {
-    uint32_t posMtx;
-    uint32_t texMtx[8];
-    float pos[3];
-    float nrm[3];
-    float color[2][4];
-    float tex[8][2];
-    bool hasNrm, hasColor[2];
-};
-
 // Malloc'd scratch arrays, grown as needed.
 template <class T>
 struct Scratch {
@@ -127,7 +116,7 @@ const uint8_t* AttrData(uint32_t attr, const uint8_t*& p, uint32_t desc) {
 }
 
 // Decodes one vertex; returns the bytes it took.
-const uint8_t* Decode(const uint8_t* p, uint32_t fmt, RawVertex& v) {
+const uint8_t* Decode(const uint8_t* p, uint32_t fmt, DecodedVertex& v) {
     const uint32_t* desc = g_state.vtxDesc;
     const AttrFmt* vat = g_state.vat[fmt];
     v.posMtx = desc[kPnMtxIdx] ? *p++ : g_state.currentPosMtx;
@@ -216,7 +205,7 @@ float Clamp01(float v) { return v < 0.0f ? 0.0f : v > 1.0f ? 1.0f : v; }
 
 // The console's lighting for one channel (color: 3 components, or alpha: 1).
 void LightChannel(const ChanCtrl& ctrl, int chan, bool alpha, const float eyePos[3], const float nrm[3],
-                  const RawVertex& rv, float* out) {
+                  const DecodedVertex& rv, float* out) {
     int first = alpha ? 3 : 0;
     int count = alpha ? 1 : 3;
     float mat[4], amb[4];
@@ -278,7 +267,7 @@ void LightChannel(const ChanCtrl& ctrl, int chan, bool alpha, const float eyePos
 
 // Transforms and lights a vertex into `out` (gx_vertex.h's layout), with
 // `numTexGens` texture coordinates.
-void Transform(const RawVertex& rv, uint32_t numTexGens, float* out) {
+void Transform(const DecodedVertex& rv, uint32_t numTexGens, float* out) {
     const State& s = g_state;
     const float* m = &s.xfMtx[(rv.posMtx & 63) * 4];
     float eye[3];
@@ -391,6 +380,55 @@ uint32_t VertexSize(uint32_t fmt) {
     return size;
 }
 
+uint32_t DecodeVertices(uint32_t fmt, const uint8_t* data, uint32_t count, DecodedVertex* out) {
+    const uint8_t* p = data;
+    for (uint32_t i = 0; i < count; i++) {
+        p = Decode(p, fmt & 7, out[i]);
+    }
+    return (uint32_t)(p - data);
+}
+
+bool Triangles(uint32_t prim) {
+    const uint32_t type = prim & 0xF8;
+    return type >= 0x80 && type <= 0xA0;
+}
+
+template <class Index>
+uint32_t TriangleIndices(uint32_t prim, uint32_t count, Index first, Index* idx) {
+    uint32_t n = 0;
+    switch (prim & 0xF8) {
+    case 0x80:  // quads
+    case 0x88:
+        for (uint32_t i = 0; i + 3 < count; i += 4) {
+            idx[n++] = first + i, idx[n++] = first + i + 1, idx[n++] = first + i + 2;
+            idx[n++] = first + i, idx[n++] = first + i + 2, idx[n++] = first + i + 3;
+        }
+        break;
+    case 0x90:  // triangles
+        for (uint32_t i = 0; i + 2 < count; i += 3) {
+            idx[n++] = first + i, idx[n++] = first + i + 1, idx[n++] = first + i + 2;
+        }
+        break;
+    case 0x98:  // strip
+        for (uint32_t i = 2; i < count; i++) {
+            if (i & 1) {
+                idx[n++] = first + i - 1, idx[n++] = first + i - 2, idx[n++] = first + i;
+            } else {
+                idx[n++] = first + i - 2, idx[n++] = first + i - 1, idx[n++] = first + i;
+            }
+        }
+        break;
+    case 0xA0:  // fan
+        for (uint32_t i = 2; i < count; i++) {
+            idx[n++] = first, idx[n++] = first + i - 1, idx[n++] = first + i;
+        }
+        break;
+    }
+    return n;
+}
+template uint32_t TriangleIndices<uint16_t>(uint32_t, uint32_t, uint16_t, uint16_t*);
+template uint32_t TriangleIndices<uint32_t>(uint32_t, uint32_t, uint32_t, uint32_t*);
+
 uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) {
     fmt &= 7;
     const uint32_t numTexGens = g_state.numTexGens < 8 ? g_state.numTexGens : 8;
@@ -398,42 +436,12 @@ uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) 
     float* verts = g_vertices.Get(count * stride);
     const uint8_t* p = data;
     for (uint32_t i = 0; i < count; i++) {
-        RawVertex rv;
+        DecodedVertex rv;
         p = Decode(p, fmt, rv);
         Transform(rv, numTexGens, verts + i * stride);
     }
     uint32_t consumed = (uint32_t)(p - data);
-
-    uint16_t* idx = g_indices.Get(count * 3 + 6);
-    uint32_t n = 0;
-    switch (prim & 0xF8) {
-    case 0x80:  // quads
-    case 0x88:
-        for (uint32_t i = 0; i + 3 < count; i += 4) {
-            idx[n++] = i, idx[n++] = i + 1, idx[n++] = i + 2;
-            idx[n++] = i, idx[n++] = i + 2, idx[n++] = i + 3;
-        }
-        break;
-    case 0x90:  // triangles
-        for (uint32_t i = 0; i + 2 < count; i += 3) {
-            idx[n++] = i, idx[n++] = i + 1, idx[n++] = i + 2;
-        }
-        break;
-    case 0x98:  // strip
-        for (uint32_t i = 2; i < count; i++) {
-            if (i & 1) {
-                idx[n++] = i - 1, idx[n++] = i - 2, idx[n++] = i;
-            } else {
-                idx[n++] = i - 2, idx[n++] = i - 1, idx[n++] = i;
-            }
-        }
-        break;
-    case 0xA0:  // fan
-        for (uint32_t i = 2; i < count; i++) {
-            idx[n++] = 0, idx[n++] = i - 1, idx[n++] = i;
-        }
-        break;
-    default: {  // lines and points: not drawn yet
+    if (!Triangles(prim)) {  // lines and points: not drawn yet
         static bool warned;
         if (!warned) {
             warned = true;
@@ -441,7 +449,8 @@ uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) 
         }
         return consumed;
     }
-    }
+    uint16_t* idx = g_indices.Get(count * 3 + 6);
+    const uint32_t n = TriangleIndices<uint16_t>(prim, count, 0, idx);
     if (n != 0) {
         SubmitTriangles(verts, stride, count, idx, n);
     }
@@ -451,6 +460,7 @@ uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) 
 namespace {
 
 void LoadXf(uint32_t addr, const uint8_t* values, uint32_t count, bool bigEndian) {
+    g_vertexGeneration++;
     for (uint32_t i = 0; i < count; i++, addr++) {
         float f;
         if (bigEndian) {
@@ -470,7 +480,7 @@ void LoadXf(uint32_t addr, const uint8_t* values, uint32_t count, bool bigEndian
 
 }  // namespace
 
-void RunDisplayList(const uint8_t* list, uint32_t size) {
+void ScanDisplayList(const uint8_t* list, uint32_t size, ListVisitor& visitor) {
     const uint8_t* p = list;
     const uint8_t* end = list + size;
     while (p < end) {
@@ -484,14 +494,17 @@ void RunDisplayList(const uint8_t* list, uint32_t size) {
             p += 5;
             if (reg >= 0xA0 && reg < 0xB0) {
                 g_state.arrayBase[kPos + (reg - 0xA0)] = value;
+                visitor.SetsArray(reg, value);
             } else if (reg >= 0xB0 && reg < 0xC0) {
                 g_state.arrayStride[kPos + (reg - 0xB0)] = value & 0xFF;
+                visitor.SetsArray(reg, value);
             }
             continue;
         }
         if (op == 0x10) {  // XF registers
             uint32_t n = Be16(p) + 1;
             uint32_t addr = Be16(p + 2);
+            visitor.LoadsXf();
             LoadXf(addr, p + 4, n, true);
             p += 4 + n * 4;
             continue;
@@ -505,11 +518,12 @@ void RunDisplayList(const uint8_t* list, uint32_t size) {
             uint32_t addr = v & 0xFFF;
             const uint8_t* src =
                 ADDR_TO_PTR(const uint8_t, g_state.arrayBase[array] + index * g_state.arrayStride[array]);
+            visitor.LoadsXf();
             LoadXf(addr, src, n, false);
             continue;
         }
         if (op == 0x40) {  // call another list
-            RunDisplayList(ADDR_TO_PTR(const uint8_t, Be32(p)), Be32(p + 4));
+            ScanDisplayList(ADDR_TO_PTR(const uint8_t, Be32(p)), Be32(p + 4), visitor);
             p += 8;
             continue;
         }
@@ -520,12 +534,22 @@ void RunDisplayList(const uint8_t* list, uint32_t size) {
         if (op >= 0x80) {
             uint32_t count = Be16(p);
             p += 2;
-            p += Draw(op & 0xF8, op & 7, p, count);
+            p += visitor.Draw(op & 0xF8, op & 7, p, count);
             continue;
         }
         std::fprintf(stderr, "frontline: unknown display list command %#x\n", op);
+        visitor.Unknown();
         return;
     }
+}
+
+void RunDisplayList(const uint8_t* list, uint32_t size) {
+    struct : ListVisitor {
+        uint32_t Draw(uint32_t prim, uint32_t fmt, const uint8_t* data, uint32_t count) override {
+            return gx::Draw(prim, fmt, data, count);
+        }
+    } draw;
+    ScanDisplayList(list, size, draw);
 }
 
 }  // namespace frontline::gx

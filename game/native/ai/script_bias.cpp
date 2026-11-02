@@ -36,40 +36,40 @@ struct Site {
     u16 word;
     u8 kind;
     s32 a, b;          // the roll's range, or a timer's delay and event
-    float factor[3];   // easy, medium, hard
+    float factor[4];   // easy, medium, hard, unfair
     const char* what;
 };
 
 const Site kSites[] = {
     // Logic thread
-    {"SoldierA_Roamer", 0, 0x030B, kChance, 1, 100, {1.0f, 0.85f, 0.7f},
+    {"SoldierA_Roamer", 0, 0x030B, kChance, 1, 100, {1.0f, 0.85f, 0.7f, 0.4f},
      "charge chance (30/50/80% by aggression; entering an attack, or from cover with the target out of sight)"},
-    {"SoldierA_Roamer", 0, 0x0328, kChance, 0, 99, {1.25f, 1.5f, 1.75f},
+    {"SoldierA_Roamer", 0, 0x0328, kChance, 0, 99, {1.25f, 1.5f, 1.75f, 2.25f},
      "stays put when a grenade lands by a squadmate (10/25/40%; otherwise runs)"},
-    {"SoldierA_Roamer", 0, 0x220F, kScale, 180, 360, {1.0f, 0.8f, 0.6f},
+    {"SoldierA_Roamer", 0, 0x220F, kScale, 180, 360, {1.0f, 0.8f, 0.6f, 0.2f},
      "AttackFromCoverPoint: target out of sight this long before charging or searching"},
-    {"SoldierA_Roamer", 0, 0x238A, kTimer, 900, 256, {1.0f, 0.8f, 0.6f},
+    {"SoldierA_Roamer", 0, 0x238A, kTimer, 900, 256, {1.0f, 0.8f, 0.6f, 0.2f},
      "AdvanceToCoverPoint: stops using cover for 15 s after one it can't reach"},
-    {"SoldierA_Roamer", 0, 0x24C3, kTimer, 600, 259, {1.0f, 0.75f, 0.5f},
+    {"SoldierA_Roamer", 0, 0x24C3, kTimer, 600, 259, {1.0f, 0.75f, 0.5f, 0.1f},
      "ChargeTarget: stops charging for 10 s after failing to reach the target"},
-    {"SoldierA_Roamer", 0, 0x25C7, kTimer, 600, 259, {1.0f, 0.75f, 0.5f},
+    {"SoldierA_Roamer", 0, 0x25C7, kTimer, 600, 259, {1.0f, 0.75f, 0.5f, 0.1f},
      "ChargeAndAttackTarget: stops charging for 10 s after failing to reach the target"},
     // Anim thread: firing from cover, cycles of an aiming animation (flag 16)
-    {"SoldierA_Roamer", 1, 0x1227, kCount, 2, 5, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 102)"},
-    {"SoldierA_Roamer", 1, 0x1305, kCount, 1, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 112)"},
-    {"SoldierA_Roamer", 1, 0x14CD, kCount, 2, 5, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 131)"},
-    {"SoldierA_Roamer", 1, 0x1593, kCount, 1, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 139)"},
-    {"SoldierA_Roamer", 1, 0x177B, kCount, 1, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 156)"},
-    {"SoldierA_Roamer", 1, 0x17E0, kCount, 1, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 159)"},
-    {"SoldierA_Roamer", 1, 0x183B, kCount, 2, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 162)"},
-    {"SoldierA_Roamer", 1, 0x18A0, kCount, 1, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 165)"},
-    {"SoldierA_Roamer", 1, 0x1968, kCount, 2, 4, {1.0f, 1.25f, 1.5f}, "cover fire burst (state 172)"},
+    {"SoldierA_Roamer", 1, 0x1227, kCount, 2, 5, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 102)"},
+    {"SoldierA_Roamer", 1, 0x1305, kCount, 1, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 112)"},
+    {"SoldierA_Roamer", 1, 0x14CD, kCount, 2, 5, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 131)"},
+    {"SoldierA_Roamer", 1, 0x1593, kCount, 1, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 139)"},
+    {"SoldierA_Roamer", 1, 0x177B, kCount, 1, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 156)"},
+    {"SoldierA_Roamer", 1, 0x17E0, kCount, 1, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 159)"},
+    {"SoldierA_Roamer", 1, 0x183B, kCount, 2, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 162)"},
+    {"SoldierA_Roamer", 1, 0x18A0, kCount, 1, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 165)"},
+    {"SoldierA_Roamer", 1, 0x1968, kCount, 2, 4, {1.0f, 1.25f, 1.5f, 2.0f}, "cover fire burst (state 172)"},
     // Anim thread: waiting behind cover, cycles of the crouched idle (14453)
-    {"SoldierA_Roamer", 1, 0x19C0, kCount, 2, 5, {1.0f, 0.8f, 0.6f}, "hiding behind cover (state 175)"},
-    {"SoldierA_Roamer", 1, 0x19F1, kCount, 4, 8, {1.0f, 0.8f, 0.6f}, "hiding behind cover (state 176)"},
-    {"SoldierA_Roamer", 1, 0x1D83, kCount, 3, 6, {1.0f, 0.8f, 0.6f}, "hiding behind cover (state 207)"},
-    {"SoldierA_Roamer", 1, 0x1DB4, kCount, 4, 10, {1.0f, 0.8f, 0.6f}, "hiding behind cover (state 208)"},
-    {"SoldierA_Roamer", 1, 0x1ED6, kCount, 4, 8, {1.0f, 0.8f, 0.6f}, "hiding behind cover (state 223)"},
+    {"SoldierA_Roamer", 1, 0x19C0, kCount, 2, 5, {1.0f, 0.8f, 0.6f, 0.2f}, "hiding behind cover (state 175)"},
+    {"SoldierA_Roamer", 1, 0x19F1, kCount, 4, 8, {1.0f, 0.8f, 0.6f, 0.2f}, "hiding behind cover (state 176)"},
+    {"SoldierA_Roamer", 1, 0x1D83, kCount, 3, 6, {1.0f, 0.8f, 0.6f, 0.2f}, "hiding behind cover (state 207)"},
+    {"SoldierA_Roamer", 1, 0x1DB4, kCount, 4, 10, {1.0f, 0.8f, 0.6f, 0.2f}, "hiding behind cover (state 208)"},
+    {"SoldierA_Roamer", 1, 0x1ED6, kCount, 4, 8, {1.0f, 0.8f, 0.6f, 0.2f}, "hiding behind cover (state 223)"},
 };
 const int kNumSites = sizeof(kSites) / sizeof(kSites[0]);
 

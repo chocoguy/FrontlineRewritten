@@ -31,6 +31,7 @@
 // The game's headers define BOOL as int; Objective-C's is bool.
 #define BOOL FRONTLINE_GAME_BOOL
 #include "frontline/platform.h"
+#include "gx_efb.h"
 #include "gx_metal.h"
 #include "gx_record.h"
 #include "gx_shader.h"
@@ -38,6 +39,7 @@
 #include "gx_texture.h"
 #include "gx_vertex.h"
 #include "native/hooks.h"
+#include "native/render.h"
 #include "os/os_internal.h"
 #include "pad_internal.h"
 #include "types.h"
@@ -113,6 +115,11 @@ os_unfair_lock g_xfbLock = OS_UNFAIR_LOCK_INIT;
 
 id<MTLCommandBuffer> g_commands;
 id<MTLRenderCommandEncoder> g_encoder;
+uint32_t g_passCount;  // encoders begun (EfbOpen)
+// Changes whenever GX binds anything in an encoder (a pass begun, a GX draw),
+// so the Modern renderer knows whether its own bindings are still in place.
+uint32_t g_bindStamp;
+uint32_t g_frames;  // GXDrawDone calls (EfbFrame)
 id<MTLCommandBuffer> g_lastCommitted;
 id<MTLCommandBuffer> g_previousFrame;  // committed by the last DrawDone
 
@@ -131,6 +138,12 @@ struct Bound {
     MTLScissorRect scissor;
     FragUniforms uniforms;
 } g_bound;
+// Nothing bound: the next draw sets everything.
+void ResetBound() {
+    std::memset(&g_bound, 0, sizeof(g_bound));
+    g_bound.cull = (MTLCullMode)~0u;
+}
+bool g_boundForeign;  // the Modern renderer bound its own (EfbForeign): ResetBound at the next draw
 NSMutableArray<id<MTLBuffer>>* g_frameBuffers;  // vertex memory used by g_commands
 id<MTLBuffer> g_vertexBuffer;
 NSUInteger g_vertexUsed;
@@ -184,6 +197,8 @@ struct Perf {
     uint32_t frames;
     uint64_t frameSum, frameMax, drawDoneWait;
     uint64_t draws, uberDraws, coverageDraws, triangles, vertices, hashes, decodes;
+    uint64_t lists[NATIVE_BIN_COUNT];  // display lists' CPU time by render bin (PerfListEnd)
+    NativeCounts native;               // the Modern renderer's (EfbNativeCounts)
     std::atomic<uint64_t> gpu;  // GPU time of the finished command buffers
     double gpuLastEnd;          // (completion handlers only)
 } g_perf;
@@ -226,16 +241,32 @@ void PerfFrame(uint64_t start, uint64_t waited) {
     std::fprintf(stderr,
                  "[perf] %.1f fps | frame %.2f ms (max %.2f) | cpu %.2f | gpu %.2f | waits: drawdone %.2f, "
                  "retrace %.2f | %.0f draws, %.0fk tris, %.0fk verts | tex %.0f hashes, %.0f decodes | "
-                 "%.0f ubershader draws, %u pipelines compiling, %.0f alpha-to-coverage draws\n",
+                 "%.0f ubershader draws, %u pipelines compiling, %.0f alpha-to-coverage draws | lists: world "
+                 "%.2f, props %.2f, characters %.2f, viewmodel %.2f, other %.2f\n",
                  n * 1e9 / (start - p.secondStart), p.frameSum / n * ms, p.frameMax * ms, cpu * ms,
                  p.gpu.exchange(0) / n * ms, p.drawDoneWait / n * ms, spin / n * ms, p.draws / n,
                  p.triangles / n / 1000, p.vertices / n / 1000, p.hashes / n, p.decodes / n, p.uberDraws / n,
-                 g_compiling, p.coverageDraws / n);
+                 g_compiling, p.coverageDraws / n, p.lists[NATIVE_BIN_WORLD] / n * ms,
+                 p.lists[NATIVE_BIN_PROP] / n * ms, p.lists[NATIVE_BIN_CHARACTER] / n * ms,
+                 p.lists[NATIVE_BIN_VIEWMODEL] / n * ms, p.lists[NATIVE_BIN_NONE] / n * ms);
+    const NativeCounts& nc = p.native;
+    if (nc.draws + nc.fallbacks[0] + nc.fallbacks[1] + nc.fallbacks[2] != 0) {
+        std::fprintf(stderr,
+                     "[perf] native: %.0f draws, %.0fk tris | fallbacks: %.0f state, %.0f compiling, %.0f budget | "
+                     "%.0f meshes made (%.2f ms), %.0f transient | %.1f MB of meshes | %llu point lights\n",
+                     nc.draws / n, nc.triangles / n / 1000, nc.fallbacks[0] / n, nc.fallbacks[1] / n,
+                     nc.fallbacks[2] / n, nc.conversions / n, nc.convertNanos / n * ms, nc.transients / n,
+                     nc.bytes / 1048576.0, (unsigned long long)nc.pointLights);
+    }
     p.secondStart = start;
     p.spinStart = os::SpinWaitNanos();
     p.frames = 0;
     p.frameSum = p.frameMax = p.drawDoneWait = 0;
     p.draws = p.uberDraws = p.coverageDraws = p.triangles = p.vertices = p.hashes = p.decodes = 0;
+    std::memset(p.lists, 0, sizeof(p.lists));
+    const uint64_t bytes = p.native.bytes;
+    p.native = {};
+    p.native.bytes = bytes;
 }
 
 // FRONTLINE_GX_UBER=1: draw everything with the ubershader, never with
@@ -253,6 +284,20 @@ id<MTLCommandBuffer> g_shadowCommands;
 id<MTLRenderCommandEncoder> g_shadowEncoder;
 id<MTLBuffer> g_verifyMine, g_verifyTheirs;  // the copied rectangles, read back
 uint32_t g_verifyCopies, g_verifyDiffering;
+
+// FRONTLINE_NATIVE_VERIFY=1, with the Modern renderer: the display lists it
+// draws are drawn by GX too, into the EFB (EfbMainOnly), and natively into the
+// second EFB, which every other draw goes to as well, with the same pipeline;
+// each frame copy compares the two ("[nativeverify]" lines).
+// FRONTLINE_NATIVE_VERIFY_DUMP=<folder> writes the first differing copies
+// (from copy FRONTLINE_NATIVE_VERIFY_DUMP_FROM, if set), both pictures and
+// their difference. Shaders compile on the spot.
+bool g_nativeVerify;
+bool g_mainOnly;    // GX draws for the EFB alone (EfbMainOnly)
+bool g_nativeDrew;  // since the last frame copy (EfbNativeDrew): else the two EFBs are the same
+
+// Whether there's a second EFB to draw into (either check).
+bool Shadowed() { return g_verify || g_nativeVerify; }
 
 // FRONTLINE_GX_SYNC=1: GXDrawDone waits for the GPU to finish the frame, as
 // on the console, instead of letting it run while the game goes on.
@@ -318,7 +363,8 @@ void InitDevice() {
         g_originalFiltering = std::getenv("FRONTLINE_GX_ORIGINAL_FILTERING") != nullptr;
         g_uber = std::getenv("FRONTLINE_GX_UBER") != nullptr;
         g_verify = !g_uber && std::getenv("FRONTLINE_GX_VERIFY") != nullptr;
-        g_syncShaders = g_verify || std::getenv("FRONTLINE_GX_SYNC_SHADERS") != nullptr;
+        g_nativeVerify = !g_verify && std::getenv("FRONTLINE_NATIVE_VERIFY") != nullptr;
+        g_syncShaders = g_verify || g_nativeVerify || std::getenv("FRONTLINE_GX_SYNC_SHADERS") != nullptr;
     });
 }
 
@@ -367,6 +413,7 @@ void MakeEfb() {
         g_samples = 1;
     }
     g_filtering = NativeGameMode() == NATIVE_MODE_REWRITTEN && !g_originalFiltering;
+    g_nativeVerify = g_nativeVerify && NativeModernRender() != 0;
     g_recordOnly = g_hfr && !g_verify && !g_hash && !g_snap && !g_hfrVerify;
     if (g_recordOnly) {
         return;
@@ -378,7 +425,7 @@ void MakeEfb() {
     desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
     desc.storageMode = MTLStorageModePrivate;
     g_efbColor = [g_device newTextureWithDescriptor:desc];
-    if (g_verify) {
+    if (Shadowed()) {
         g_shadowColor = [g_device newTextureWithDescriptor:desc];
     }
     if (g_samples > 1) {
@@ -386,14 +433,14 @@ void MakeEfb() {
         desc.sampleCount = g_samples;
         desc.usage = MTLTextureUsageRenderTarget;
         g_efbMsaa = [g_device newTextureWithDescriptor:desc];
-        if (g_verify) {
+        if (Shadowed()) {
             g_shadowMsaa = [g_device newTextureWithDescriptor:desc];
         }
     }
     desc.pixelFormat = MTLPixelFormatDepth32Float;
     desc.usage = MTLTextureUsageRenderTarget;
     g_efbDepth = [g_device newTextureWithDescriptor:desc];
-    if (g_verify) {
+    if (Shadowed()) {
         g_shadowDepth = [g_device newTextureWithDescriptor:desc];
     }
 }
@@ -485,7 +532,9 @@ void BeginPass() {
     g_clearColorPending = g_clearDepthPending = false;
     g_encoder = [g_commands renderCommandEncoderWithDescriptor:pass];
     [g_encoder setFrontFacingWinding:MTLWindingClockwise];
-    if (g_verify) {
+    g_passCount++;
+    g_bindStamp++;
+    if (Shadowed()) {
         if (g_shadowCommands == nil) {
             g_shadowCommands = [g_queue commandBuffer];
         }
@@ -500,8 +549,7 @@ void BeginPass() {
         g_shadowEncoder = [g_shadowCommands renderCommandEncoderWithDescriptor:shadow];
         [g_shadowEncoder setFrontFacingWinding:MTLWindingClockwise];
     }
-    std::memset(&g_bound, 0, sizeof(g_bound));
-    g_bound.cull = (MTLCullMode)~0u;
+    ResetBound();
 }
 
 // Ends the pass. `depthUnused`, `colorUnused`: the next pass clears depth or
@@ -706,8 +754,16 @@ id<MTLRenderPipelineState> Pipeline() {
 struct Shape {
     uint32_t blend;
     uint32_t numStages, numIndStages, numTexGens, alphaFuncs, fogType, texValid, indOrder, indScale;
+    uint32_t vertex;  // 0: GX's vertex stage (tev_vertex); else a native one (EfbVertexFunctions), | kLitFragment
     uint32_t stages[16][7];
 };
+
+// Shape::vertex: the fragment stage lights per pixel (tev_fragment_lit).
+constexpr uint32_t kLitFragment = 1u << 8;
+
+// The native vertex functions (EfbVertexFunctions): by variant and generated
+// texture coordinates.
+id<MTLFunction> (^g_vertexFunctions)(uint32_t variant, uint32_t numTexGens);
 
 void MakeShape(const FragUniforms& u, uint32_t numTexGens, Shape& shape) {
     std::memset(&shape, 0, sizeof(shape));
@@ -794,11 +850,16 @@ void CompileSpecialized(const Shape& shape, uint64_t key) {
         [values setConstantValues:shape.stages[i] type:MTLDataTypeUInt withRange:NSMakeRange(16 + i * 8, 7)];
     }
     MTLRenderPipelineDescriptor* desc = Descriptor(shape.blend);
+    const uint32_t variant = shape.vertex & ~kLitFragment, numTexGens = shape.numTexGens;
+    NSString* fragmentName = (shape.vertex & kLitFragment) != 0 ? @"tev_fragment_lit" : @"tev_fragment";
     void (^compile)(void) = ^{
         NSError* error = nil;
-        id<MTLFunction> vertex = [g_library newFunctionWithName:@"tev_vertex" constantValues:values error:&error];
+        id<MTLFunction> vertex = variant != 0 ? g_vertexFunctions(variant, numTexGens)
+                                              : [g_library newFunctionWithName:@"tev_vertex"
+                                                                constantValues:values
+                                                                         error:&error];
         id<MTLFunction> fragment =
-            vertex != nil ? [g_library newFunctionWithName:@"tev_fragment" constantValues:values error:&error] : nil;
+            vertex != nil ? [g_library newFunctionWithName:fragmentName constantValues:values error:&error] : nil;
         id<MTLRenderPipelineState> pipeline = nil;
         if (fragment != nil) {
             desc.vertexFunction = vertex;
@@ -878,19 +939,35 @@ id<MTLSamplerState> Sampler(const TexObj& t, bool mipmapped) {
 }
 
 // A hash of texture data: every word up to 32 KB, else 4096 words spread
-// over it.
+// over it. Four words at a time into four hashes, so the multiplies overlap:
+// every texture a frame draws is hashed at each frame copy.
 uint64_t Hash(const uint8_t* p, uint32_t size) {
-    uint64_t h = 0xcbf29ce484222325ull ^ size;
+    constexpr uint64_t kPrime = 0x100000001b3ull;
+    uint64_t h[4] = {0xcbf29ce484222325ull ^ size, 0x84222325cbf29ce4ull, 0x9e3779b97f4a7c15ull,
+                     0xc2b2ae3d27d4eb4full};
     const uint32_t words = size / 8, step = words > 4096 ? words / 4096 : 1;
-    for (uint32_t i = 0; i < words; i += step) {
+    uint32_t i = 0;
+    for (; i + 3 * step < words; i += 4 * step) {
+        uint64_t w[4];
+        for (int l = 0; l < 4; l++) {
+            std::memcpy(&w[l], p + (size_t)(i + l * step) * 8, 8);
+            h[l] = (h[l] ^ w[l]) * kPrime;
+        }
+    }
+    for (; i < words; i += step) {
         uint64_t w;
         std::memcpy(&w, p + (size_t)i * 8, 8);
-        h = (h ^ w) * 0x100000001b3ull;
+        h[0] = (h[0] ^ w) * kPrime;
     }
-    for (uint32_t i = words * 8; i < size; i++) {
-        h = (h ^ p[i]) * 0x100000001b3ull;
+    for (uint32_t b = words * 8; b < size; b++) {
+        h[0] = (h[0] ^ p[b]) * kPrime;
     }
-    return h;
+    uint64_t out = h[0];
+    for (int l = 1; l < 4; l++) {
+        out = (out ^ h[l]) * kPrime;
+        out ^= out >> 29;
+    }
+    return out;
 }
 
 // The decoded textures, by address, format, size, levels and palette. Each
@@ -1025,6 +1102,120 @@ void PackStage(const TevStage& t, uint32_t* out) {
     out[7] = 0;
 }
 
+// The TEV shader's uniforms for the TEV setup now, with the textures and
+// samplers its stages read (index m when u.texValid has bit m).
+void FillFragUniforms(FragUniforms& u, id<MTLTexture> __strong* textures, id<MTLSamplerState> __strong* samplers) {
+    const State& s = g_state;
+    std::memset(&u, 0, sizeof(u));
+    u.numStages = s.numTevStages < 1 ? 1 : s.numTevStages > 16 ? 16 : s.numTevStages;
+    for (uint32_t i = 0; i < u.numStages; i++) {
+        PackStage(s.tev[i], u.stages[i]);
+    }
+    for (int i = 0; i < 4; i++) {
+        for (int c = 0; c < 4; c++) {
+            u.konst[i][c] = s.kColor[i][c] / 255.0f;
+            u.swap[i][c] = s.swapTable[i][c];
+        }
+    }
+    std::memcpy(u.alphaComp, s.alphaComp, sizeof(u.alphaComp));
+    u.alphaCoverage = AlphaCoverage() ? 1u : 0u;
+    g_perf.coverageDraws += u.alphaCoverage;
+    u.fogType = s.fogType;
+    std::memcpy(u.fog, s.fog, sizeof(u.fog));
+    for (int c = 0; c < 4; c++) {
+        u.fogColor[c] = s.fogColor[c] / 255.0f;
+    }
+    u.numIndStages = s.numIndStages;
+    for (int m = 0; m < 3; m++) {
+        for (int r = 0; r < 2; r++) {
+            for (int c = 0; c < 3; c++) {
+                u.indMtx[m][r][c] = s.indMtx[m][r][c];
+            }
+            u.indMtx[m][r][3] = (float)(1 << (s.indMtxScale[m] + 17)) / (float)(1 << 17);
+        }
+    }
+    for (int i = 0; i < 4; i++) {
+        u.indOrder[i][0] = s.indOrder[i][0] & 7;
+        u.indOrder[i][1] = s.indOrder[i][1] & 7;
+        u.indOrder[i][2] = s.indScale[i][0];
+        u.indOrder[i][3] = s.indScale[i][1];
+    }
+
+    // Texture maps the stages (or indirect stages) read.
+    uint32_t used = 0;
+    for (uint32_t i = 0; i < u.numStages; i++) {
+        if (s.tev[i].texMap < 8) {
+            used |= 1u << s.tev[i].texMap;
+        }
+    }
+    for (uint32_t i = 0; i < s.numIndStages && i < 4; i++) {
+        used |= 1u << (s.indOrder[i][1] & 7);
+    }
+    for (uint32_t m = 0; m < 8; m++) {
+        if (!(used & (1u << m))) {
+            continue;
+        }
+        uint32_t levels = 1;
+        id<MTLTexture> texture = Texture(s.texMap[m], &levels);
+        if (texture == nil) {
+            continue;
+        }
+        u.texValid |= 1u << m;
+        u.texSize[m][0] = s.texMap[m].width;
+        u.texSize[m][1] = s.texMap[m].height;
+        textures[m] = texture;
+        samplers[m] = Sampler(s.texMap[m], levels > 1);
+    }
+
+    // Texture coordinate sizes (see FragUniforms::coordSize).
+    for (uint32_t i = 0; i < s.numIndStages && i < 4; i++) {
+        uint32_t coord = s.indOrder[i][0] & 7, map = s.indOrder[i][1] & 7;
+        u.coordSize[coord][0] = s.texMap[map].width;
+        u.coordSize[coord][1] = s.texMap[map].height;
+    }
+    for (uint32_t i = 0; i < u.numStages; i++) {
+        uint32_t coord = s.tev[i].texCoord, map = s.tev[i].texMap;
+        if (coord < 8 && map < 8) {
+            u.coordSize[coord][0] = s.texMap[map].width;
+            u.coordSize[coord][1] = s.texMap[map].height;
+        }
+    }
+    for (int c = 0; c < 8; c++) {
+        if (u.coordSize[c][0] == 0.0f) {
+            u.coordSize[c][0] = u.coordSize[c][1] = 1.0f;
+        }
+    }
+    for (int m = 0; m < 8; m++) {
+        if (u.texSize[m][0] == 0.0f) {
+            u.texSize[m][0] = u.texSize[m][1] = 1.0f;
+        }
+    }
+}
+
+// The viewport and scissor now, in the EFB's pixels; false if the scissor is
+// empty.
+bool ViewportScissor(MTLViewport& vp, MTLScissorRect& scissor) {
+    const State& s = g_state;
+    const double k = g_scale;
+    vp = {s.viewport[0] * k, s.viewport[1] * k, s.viewport[2] * k, s.viewport[3] * k, s.viewport[4], s.viewport[5]};
+    uint32_t sx = s.scissor[0] < g_efbWidth ? s.scissor[0] : g_efbWidth - 1;
+    uint32_t sy = s.scissor[1] < kEfbHeight ? s.scissor[1] : kEfbHeight - 1;
+    uint32_t sw = sx + s.scissor[2] <= g_efbWidth ? s.scissor[2] : g_efbWidth - sx;
+    uint32_t sh = sy + s.scissor[3] <= kEfbHeight ? s.scissor[3] : kEfbHeight - sy;
+    if (sw == 0 || sh == 0) {
+        return false;
+    }
+    if (g_scale != 1.0f) {
+        // Every pixel the console's rectangle touches.
+        uint32_t x0 = (uint32_t)std::floor(sx * k), y0 = (uint32_t)std::floor(sy * k);
+        uint32_t x1 = std::min((uint32_t)std::ceil((sx + sw) * k), g_efbPixels[0]);
+        uint32_t y1 = std::min((uint32_t)std::ceil((sy + sh) * k), g_efbPixels[1]);
+        sx = x0, sy = y0, sw = x1 - x0, sh = y1 - y0;
+    }
+    scissor = {sx, sy, sw, sh};
+    return true;
+}
+
 // FRONTLINE_GX_SNAP=copy:draw,draw,... writes the EFB after those draws of
 // the frame that ends with that frame copy (counting from 1) to
 // $FRONTLINE_GX_SNAP_DIR/snap-<copy>-<draw>.ppm, to see a frame being built.
@@ -1130,92 +1321,9 @@ traced:
     }
 
     FragUniforms u;
-    std::memset(&u, 0, sizeof(u));
-    u.numStages = s.numTevStages < 1 ? 1 : s.numTevStages > 16 ? 16 : s.numTevStages;
-    for (uint32_t i = 0; i < u.numStages; i++) {
-        PackStage(s.tev[i], u.stages[i]);
-    }
-    for (int i = 0; i < 4; i++) {
-        for (int c = 0; c < 4; c++) {
-            u.konst[i][c] = s.kColor[i][c] / 255.0f;
-            u.swap[i][c] = s.swapTable[i][c];
-        }
-    }
-    std::memcpy(u.alphaComp, s.alphaComp, sizeof(u.alphaComp));
-    u.alphaCoverage = AlphaCoverage() ? 1u : 0u;
-    g_perf.coverageDraws += u.alphaCoverage;
-    u.fogType = s.fogType;
-    std::memcpy(u.fog, s.fog, sizeof(u.fog));
-    for (int c = 0; c < 4; c++) {
-        u.fogColor[c] = s.fogColor[c] / 255.0f;
-    }
-    u.numIndStages = s.numIndStages;
-    for (int m = 0; m < 3; m++) {
-        for (int r = 0; r < 2; r++) {
-            for (int c = 0; c < 3; c++) {
-                u.indMtx[m][r][c] = s.indMtx[m][r][c];
-            }
-            u.indMtx[m][r][3] = (float)(1 << (s.indMtxScale[m] + 17)) / (float)(1 << 17);
-        }
-    }
-    for (int i = 0; i < 4; i++) {
-        u.indOrder[i][0] = s.indOrder[i][0] & 7;
-        u.indOrder[i][1] = s.indOrder[i][1] & 7;
-        u.indOrder[i][2] = s.indScale[i][0];
-        u.indOrder[i][3] = s.indScale[i][1];
-    }
-
-    // Texture maps the stages (or indirect stages) read.
-    uint32_t used = 0;
-    for (uint32_t i = 0; i < u.numStages; i++) {
-        if (s.tev[i].texMap < 8) {
-            used |= 1u << s.tev[i].texMap;
-        }
-    }
-    for (uint32_t i = 0; i < s.numIndStages && i < 4; i++) {
-        used |= 1u << (s.indOrder[i][1] & 7);
-    }
     id<MTLTexture> textures[8];
     id<MTLSamplerState> samplers[8];
-    for (uint32_t m = 0; m < 8; m++) {
-        if (!(used & (1u << m))) {
-            continue;
-        }
-        uint32_t levels = 1;
-        id<MTLTexture> texture = Texture(s.texMap[m], &levels);
-        if (texture == nil) {
-            continue;
-        }
-        u.texValid |= 1u << m;
-        u.texSize[m][0] = s.texMap[m].width;
-        u.texSize[m][1] = s.texMap[m].height;
-        textures[m] = texture;
-        samplers[m] = Sampler(s.texMap[m], levels > 1);
-    }
-
-    // Texture coordinate sizes (see FragUniforms::coordSize).
-    for (uint32_t i = 0; i < s.numIndStages && i < 4; i++) {
-        uint32_t coord = s.indOrder[i][0] & 7, map = s.indOrder[i][1] & 7;
-        u.coordSize[coord][0] = s.texMap[map].width;
-        u.coordSize[coord][1] = s.texMap[map].height;
-    }
-    for (uint32_t i = 0; i < u.numStages; i++) {
-        uint32_t coord = s.tev[i].texCoord, map = s.tev[i].texMap;
-        if (coord < 8 && map < 8) {
-            u.coordSize[coord][0] = s.texMap[map].width;
-            u.coordSize[coord][1] = s.texMap[map].height;
-        }
-    }
-    for (int c = 0; c < 8; c++) {
-        if (u.coordSize[c][0] == 0.0f) {
-            u.coordSize[c][0] = u.coordSize[c][1] = 1.0f;
-        }
-    }
-    for (int m = 0; m < 8; m++) {
-        if (u.texSize[m][0] == 0.0f) {
-            u.texSize[m][0] = u.texSize[m][1] = 1.0f;
-        }
-    }
+    FillFragUniforms(u, textures, samplers);
 
     VertexUniforms vertexUniforms;
     std::memset(&vertexUniforms, 0, sizeof(vertexUniforms));
@@ -1233,24 +1341,11 @@ traced:
     }
     id<MTLDepthStencilState> depth = DepthState();
     const MTLCullMode cull = s.cullMode == 1 ? MTLCullModeFront : s.cullMode == 2 ? MTLCullModeBack : MTLCullModeNone;
-    const double k = g_scale;
-    MTLViewport vp = {s.viewport[0] * k, s.viewport[1] * k, s.viewport[2] * k, s.viewport[3] * k, s.viewport[4],
-                      s.viewport[5]};
-    uint32_t sx = s.scissor[0] < g_efbWidth ? s.scissor[0] : g_efbWidth - 1;
-    uint32_t sy = s.scissor[1] < kEfbHeight ? s.scissor[1] : kEfbHeight - 1;
-    uint32_t sw = sx + s.scissor[2] <= g_efbWidth ? s.scissor[2] : g_efbWidth - sx;
-    uint32_t sh = sy + s.scissor[3] <= kEfbHeight ? s.scissor[3] : kEfbHeight - sy;
-    if (sw == 0 || sh == 0) {
+    MTLViewport vp;
+    MTLScissorRect scissor;
+    if (!ViewportScissor(vp, scissor)) {
         return;
     }
-    if (g_scale != 1.0f) {
-        // Every pixel the console's rectangle touches.
-        uint32_t x0 = (uint32_t)std::floor(sx * k), y0 = (uint32_t)std::floor(sy * k);
-        uint32_t x1 = std::min((uint32_t)std::ceil((sx + sw) * k), g_efbPixels[0]);
-        uint32_t y1 = std::min((uint32_t)std::ceil((sy + sh) * k), g_efbPixels[1]);
-        sx = x0, sy = y0, sw = x1 - x0, sh = y1 - y0;
-    }
-    const MTLScissorRect scissor = {sx, sy, sw, sh};
     if (g_hfr) {
         RecordedDraw d;
         std::memset(&d, 0, sizeof(d));
@@ -1279,6 +1374,10 @@ traced:
     }
     if (g_recordOnly) {
         return;
+    }
+    if (g_boundForeign) {
+        ResetBound();
+        g_boundForeign = false;
     }
     if (g_bound.pipeline != pipeline) {
         [g_encoder setRenderPipelineState:pipeline];
@@ -1331,9 +1430,11 @@ traced:
                          indexBuffer:ib
                    indexBufferOffset:iOffset];
 
-    if (g_shadowEncoder != nil) {  // FRONTLINE_GX_VERIFY: the same draw with the ubershader
+    g_bindStamp++;
+    if (g_shadowEncoder != nil && !g_mainOnly) {
+        // FRONTLINE_GX_VERIFY: the same draw with the ubershader. FRONTLINE_NATIVE_VERIFY: the same draw.
         id<MTLRenderCommandEncoder> e = g_shadowEncoder;
-        [e setRenderPipelineState:Pipeline()];
+        [e setRenderPipelineState:g_nativeVerify ? pipeline : Pipeline()];
         [e setDepthStencilState:depth];
         [e setCullMode:cull];
         [e setViewport:vp];
@@ -1356,10 +1457,23 @@ traced:
     SnapshotCheck();
 }
 
+// FRONTLINE_NATIVE_VERIFY_DUMP: a frame copy's RGB of RGBA pixels as a PPM.
+void WritePpm(const char* path, const uint8_t* rgba, uint32_t width, uint32_t height) {
+    if (FILE* f = std::fopen(path, "wb")) {
+        std::fprintf(f, "P6\n%u %u\n255\n", width, height);
+        for (uint32_t i = 0; i < width * height; i++) {
+            std::fwrite(rgba + i * 4, 1, 3, f);
+        }
+        std::fclose(f);
+    }
+}
+
 // FRONTLINE_GX_VERIFY: compares a frame copy drawn with specialized
 // pipelines (`mine`) with the ubershader's (`theirs`), RGB of RGBA pixels.
-void VerifyCompare(const uint8_t* mine, const uint8_t* theirs, uint32_t pixels) {
-    uint32_t differ = 0, most = 0, first = 0;
+// FRONTLINE_NATIVE_VERIFY: GX's (`mine`) with the Modern renderer's.
+void VerifyCompare(const uint8_t* mine, const uint8_t* theirs, uint32_t width, uint32_t height) {
+    const uint32_t pixels = width * height;
+    uint32_t differ = 0, over2 = 0, over8 = 0, most = 0, first = 0;
     for (uint32_t i = 0; i < pixels; i++) {
         uint32_t d = 0;
         for (int c = 0; c < 3; c++) {
@@ -1368,19 +1482,43 @@ void VerifyCompare(const uint8_t* mine, const uint8_t* theirs, uint32_t pixels) 
         if (d != 0 && differ++ == 0) {
             first = i;
         }
+        over2 += d > 2;
+        over8 += d > 8;
         most = std::max(most, d);
     }
+    const char* name = g_nativeVerify ? "nativeverify" : "gxverify";
     g_verifyCopies++;
     if (differ != 0) {
         g_verifyDiffering++;
         const uint8_t *m = mine + first * 4, *t = theirs + first * 4;
         std::fprintf(stderr,
-                     "[gxverify] copy %u: %u of %u pixels differ, by up to %u (first: pixel %u, %u %u %u, not "
-                     "%u %u %u)\n",
-                     g_copyCount, differ, pixels, most, first, m[0], m[1], m[2], t[0], t[1], t[2]);
+                     "[%s] copy %u: %u of %u pixels differ (%u by more than 2, %u by more than 8), by up to %u "
+                     "(first: pixel %u, %u %u %u, not %u %u %u)\n",
+                     name, g_copyCount, differ, pixels, over2, over8, most, first, m[0], m[1], m[2], t[0], t[1], t[2]);
+        static const char* dump = std::getenv("FRONTLINE_NATIVE_VERIFY_DUMP");
+        static const uint32_t from = std::getenv("FRONTLINE_NATIVE_VERIFY_DUMP_FROM") != nullptr
+                                         ? (uint32_t)std::atoi(std::getenv("FRONTLINE_NATIVE_VERIFY_DUMP_FROM"))
+                                         : 0;
+        static uint32_t dumped;
+        if (g_nativeVerify && dump != nullptr && over8 != 0 && g_copyCount >= from && dumped < 12) {
+            dumped++;
+            char path[1024];
+            std::snprintf(path, sizeof(path), "%s/copy%u-gx.ppm", dump, g_copyCount);
+            WritePpm(path, mine, width, height);
+            std::snprintf(path, sizeof(path), "%s/copy%u-native.ppm", dump, g_copyCount);
+            WritePpm(path, theirs, width, height);
+            std::vector<uint8_t> diff((size_t)pixels * 4);
+            for (uint32_t i = 0; i < pixels; i++) {
+                for (int c = 0; c < 3; c++) {
+                    diff[i * 4 + c] = (uint8_t)std::min(255, 8 * std::abs(mine[i * 4 + c] - theirs[i * 4 + c]));
+                }
+            }
+            std::snprintf(path, sizeof(path), "%s/copy%u-diff.ppm", dump, g_copyCount);
+            WritePpm(path, diff.data(), width, height);
+        }
     }
     if (g_verifyCopies % 300 == 0) {
-        std::fprintf(stderr, "[gxverify] %u frame copies compared, %u differed\n", g_verifyCopies, g_verifyDiffering);
+        std::fprintf(stderr, "[%s] %u frame copies compared, %u differed\n", name, g_verifyCopies, g_verifyDiffering);
     }
 }
 
@@ -1402,6 +1540,7 @@ void CopyDisp(void* dest, bool clear) {
     }
     g_drawCalls = g_triangles = 0;
     g_copyCount++;
+    g_pixelGeneration++;  // texture contents are checked again
     g_tracePerspSet = false;
     id<MTLTexture> target = nil;
     MakeEfb();
@@ -1500,8 +1639,12 @@ void CopyDisp(void* dest, bool clear) {
         }];
     }
     // FRONTLINE_GX_VERIFY: the copied rectangle of both EFBs, to compare.
+    // FRONTLINE_NATIVE_VERIFY: only if the Modern renderer drew (menus and
+    // movies then go at their pace, as without the check).
     id<MTLCommandBuffer> shadow = g_shadowCommands;
-    if (shadow != nil) {
+    const bool compare = shadow != nil && (!g_nativeVerify || g_nativeDrew);
+    g_nativeDrew = false;
+    if (compare) {
         if (g_verifyMine.length < (NSUInteger)w * h * 4) {  // (each copy waits for the last)
             g_verifyMine = [g_device newBufferWithLength:(NSUInteger)w * h * 4 options:MTLResourceStorageModeShared];
             g_verifyTheirs = [g_device newBufferWithLength:(NSUInteger)w * h * 4 options:MTLResourceStorageModeShared];
@@ -1528,11 +1671,11 @@ void CopyDisp(void* dest, bool clear) {
     std::memcpy(g_pendingClearColor, g_state.clearColor, 4);
     g_pendingClearZ = g_state.clearZ;
     Commit();
-    if (shadow != nil) {
+    if (compare) {
         [shadow waitUntilCompleted];
         [g_lastCommitted waitUntilCompleted];
         VerifyCompare(static_cast<const uint8_t*>(g_verifyMine.contents),
-                      static_cast<const uint8_t*>(g_verifyTheirs.contents), w * h);
+                      static_cast<const uint8_t*>(g_verifyTheirs.contents), w, h);
     }
     // After the commit, so the display never takes the texture before its copy.
     uint32_t* words = static_cast<uint32_t*>(dest);
@@ -1672,6 +1815,7 @@ void DrawDone() {
         objc_autoreleasePoolPop(pool);
     }
     pool = objc_autoreleasePoolPush();
+    g_frames++;
     Commit();
     if (g_record != nullptr && g_copiedSinceDraw) {
         EndRecordedFrame();
@@ -1684,6 +1828,64 @@ void DrawDone() {
     g_previousFrame = g_lastCommitted;
     if (g_perf.on) {
         PerfFrame(start, NowNanos() - start);
+    }
+}
+
+EfbPass EfbOpen() {
+    BeginPass();
+    g_copiedSinceDraw = false;
+    return {g_encoder, g_shadowEncoder, g_bindStamp};
+}
+
+bool EfbNativeVerify() { return g_nativeVerify; }
+
+void EfbMainOnly(bool on) { g_mainOnly = on; }
+
+void EfbNativeDrew() { g_nativeDrew = true; }
+
+bool EfbSyncShaders() { return g_syncShaders; }
+
+uint32_t EfbFrame() { return g_frames; }
+
+NativeCounts* EfbNativeCounts() { return g_perf.on ? &g_perf.native : nullptr; }
+
+void EfbVertexFunctions(id<MTLFunction> (^make)(uint32_t variant, uint32_t numTexGens)) { g_vertexFunctions = make; }
+
+id<MTLRenderPipelineState> EfbPipeline(const FragUniforms& u, uint32_t numTexGens, uint32_t variant, bool lit) {
+    Shape shape;
+    MakeShape(u, numTexGens, shape);
+    shape.vertex = variant | (lit ? kLitFragment : 0);
+    return Specialized(shape);
+}
+
+void EfbForeign() { g_boundForeign = true; }
+
+id<MTLBuffer> EfbUpload(const void* data, uint32_t size, uint32_t* offset) {
+    NSUInteger at = 0;
+    id<MTLBuffer> buffer = Upload(data, size, &at);
+    *offset = (uint32_t)at;
+    return buffer;
+}
+
+uint32_t EfbSamples() { return g_samples; }
+
+bool EfbRect(MTLViewport* viewport, MTLScissorRect* scissor) { return ViewportScissor(*viewport, *scissor); }
+
+id<MTLDepthStencilState> EfbDepthState() { return DepthState(); }
+
+uint32_t EfbBlendKey() { return BlendKey(); }
+
+MTLRenderPipelineDescriptor* EfbPipelineDescriptor(uint32_t key) { return Descriptor(key); }
+
+void EfbFragUniforms(FragUniforms* u, id<MTLTexture> __strong textures[8], id<MTLSamplerState> __strong samplers[8]) {
+    FillFragUniforms(*u, textures, samplers);
+}
+
+uint64_t PerfListStart() { return g_perf.on ? NowNanos() : 0; }
+
+void PerfListEnd(uint64_t start, int bin) {
+    if (start != 0 && bin >= 0 && bin < NATIVE_BIN_COUNT) {
+        g_perf.lists[bin] += NowNanos() - start;
     }
 }
 

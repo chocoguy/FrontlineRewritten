@@ -168,6 +168,19 @@ struct State {
 
 extern State g_state;
 
+// Counts changes to the vertex format (descriptors and attribute formats),
+// so the mesh cache (platform/src/mesh/) can tell when it may have changed.
+extern uint32_t g_formatGeneration;
+
+// Count changes to the rest of the state the Modern renderer takes at each
+// draw, so it can reuse what it took while they stay the same: the pixel side
+// (TEV, textures and palettes, blend, depth, culling, fog; and each frame
+// copy, after which texture contents are checked again) and the vertex side
+// (matrices, projection, viewport and scissor, lighting channels and lights,
+// texture coordinate generation).
+extern uint32_t g_pixelGeneration;
+extern uint32_t g_vertexGeneration;
+
 void ResetState();
 
 }  // namespace frontline::gx

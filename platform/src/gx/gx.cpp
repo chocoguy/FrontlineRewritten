@@ -11,11 +11,16 @@
 #include "gx_metal.h"
 #include "gx_state.h"
 #include "gx_vertex.h"
+#include "mesh/mesh.h"
+#include "native/render.h"
 #include "os/os_internal.h"
 
 namespace frontline::gx {
 
 State g_state;
+uint32_t g_formatGeneration;
+uint32_t g_pixelGeneration;
+uint32_t g_vertexGeneration;
 
 namespace {
 
@@ -69,11 +74,45 @@ void SetTevPreset(TevStage& t, uint32_t stage, uint32_t mode) {
     }
 }
 
-TevStage& Stage(uint32_t stage) { return g_state.tev[stage & 15]; }
+// The generations count changes only: the bins set much of the state again
+// for each draw, mostly to what it was.
+template <class T>
+void Set(T& field, T value, uint32_t& generation) {
+    if (field != value) {
+        field = value;
+        generation++;
+    }
+}
+void SetBytes(void* field, const void* value, size_t size, uint32_t& generation) {
+    if (std::memcmp(field, value, size) != 0) {
+        std::memcpy(field, value, size);
+        generation++;
+    }
+}
+
+bool SameStage(const TevStage& a, const TevStage& b) {
+    return std::memcmp(&a, &b, offsetof(TevStage, indAddPrev)) == 0 && a.indAddPrev == b.indAddPrev &&
+           a.indUtcLod == b.indUtcLod && a.indAlphaSel == b.indAlphaSel && a.indirect == b.indirect;
+}
+
+// A TEV stage being set, counted if it changed.
+struct StageEdit {
+    TevStage& t;
+    const TevStage before;
+    explicit StageEdit(uint32_t stage) : t(g_state.tev[stage & 15]), before(t) {}
+    ~StageEdit() {
+        if (!SameStage(before, t)) {
+            g_pixelGeneration++;
+        }
+    }
+};
 
 }  // namespace
 
 void ResetState() {
+    g_formatGeneration++;
+    g_pixelGeneration++;
+    g_vertexGeneration++;
     State& s = g_state;
     TexObj maps[8];
     std::memcpy(maps, s.texMap, sizeof(maps));
@@ -223,7 +262,7 @@ void GXDrawDone(void) {
     DrawDone();
 }
 void GXInvalidateVtxCache(void) {}
-void GXSetColorUpdate(u8 update) { g_state.colorUpdate = update != 0; }
+void GXSetColorUpdate(u8 update) { Set(g_state.colorUpdate, update != 0, g_pixelGeneration); }
 void GXSetCopyClear(GXColor color, u32 z) {
     std::memcpy(g_state.clearColor, &color, 4);
     g_state.clearZ = z;
@@ -250,6 +289,12 @@ void GXInitTexObj(GXTexObj* obj, void* image, u16 width, u16 height, u32 format,
     }
     t->maxLod = mipmap ? lod : 0;
 }
+void GXInitTexObjWrapMode(GXTexObj* obj, u32 wrapS, u32 wrapT) {
+    TexObj* t = reinterpret_cast<TexObj*>(obj);
+    t->wrapS = (u8)wrapS;
+    t->wrapT = (u8)wrapT;
+}
+void GXInitTexObjTlut(GXTexObj* obj, u32 tlutName) { reinterpret_cast<TexObj*>(obj)->tlut = tlutName; }
 void GXInitTexObjCI(GXTexObj* obj, void* image, u16 width, u16 height, u32 format, u32 wrapS, u32 wrapT, u8 mipmap,
                     u32 tlutName) {
     GXInitTexObj(obj, image, width, height, format, wrapS, wrapT, mipmap);
@@ -281,11 +326,12 @@ void GXInitTlutObj(GXTlutObj* obj, void* lut, u32 format, u16 numEntries) {
 }
 void GXLoadTexObj(GXTexObj* obj, u32 id) {
     if (id < 8) {
-        std::memcpy(&g_state.texMap[id], obj, sizeof(TexObj));
+        SetBytes(&g_state.texMap[id], obj, sizeof(TexObj), g_pixelGeneration);
     }
 }
 void GXLoadTlut(GXTlutObj* obj, u32 name) {
-    g_state.tluts[name % 20] = {obj->dummy[0], obj->dummy[1], obj->dummy[2]};
+    const Tlut tlut = {obj->dummy[0], obj->dummy[1], obj->dummy[2]};
+    SetBytes(&g_state.tluts[name % 20], &tlut, sizeof(tlut), g_pixelGeneration);
 }
 
 // Lights (the SDK's attenuation formulas)
@@ -354,19 +400,21 @@ void GXLoadLightObjImm(GXLightObj* lt, u32 light) {
         return;
     }
     const LightObj* l = reinterpret_cast<const LightObj*>(lt);
-    Light& dst = g_state.lights[__builtin_ctz(light) & 7];
+    Light loaded;
     for (int i = 0; i < 4; i++) {
-        dst.color[i] = l->color[i] / 255.0f;
+        loaded.color[i] = l->color[i] / 255.0f;
     }
     for (int i = 0; i < 3; i++) {
-        dst.pos[i] = l->pos[i], dst.dir[i] = l->dir[i], dst.a[i] = l->a[i], dst.k[i] = l->k[i];
+        loaded.pos[i] = l->pos[i], loaded.dir[i] = l->dir[i], loaded.a[i] = l->a[i], loaded.k[i] = l->k[i];
     }
+    SetBytes(&g_state.lights[__builtin_ctz(light) & 7], &loaded, sizeof(loaded), g_vertexGeneration);
 }
 
 // Indirect texturing
 void GXSetIndTexCoordScale(u32 stage, u32 s, u32 t) {
     g_state.indScale[stage & 3][0] = s;
     g_state.indScale[stage & 3][1] = t;
+    g_pixelGeneration++;
 }
 void GXSetIndTexMtx(u32 id, f32 offset[2][3], s8 scaleExp) {
     if (id < 1 || id > 3) {
@@ -378,22 +426,31 @@ void GXSetIndTexMtx(u32 id, f32 offset[2][3], s8 scaleExp) {
         }
     }
     g_state.indMtxScale[id - 1] = scaleExp;
+    g_pixelGeneration++;
 }
-void GXSetNumIndStages(u8 n) { g_state.numIndStages = n; }
+void GXSetNumIndStages(u8 n) {
+    g_state.numIndStages = n;
+    g_pixelGeneration++;
+}
 void GXSetIndTexOrder(u32 stage, u32 coord, u32 map) {
     g_state.indOrder[stage & 3][0] = coord;
     g_state.indOrder[stage & 3][1] = map;
+    g_pixelGeneration++;
 }
 void GXSetTevIndirect(u32 stage, u32 indStage, u32 format, u32 bias, u32 mtx, u32 wrapS, u32 wrapT, u8 addPrev,
                       u8 utcLod, u32 alphaSel) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.indStage = indStage, t.indFormat = format, t.indBias = bias, t.indMtx = mtx;
     t.indWrapS = wrapS, t.indWrapT = wrapT, t.indAddPrev = addPrev != 0, t.indUtcLod = utcLod != 0;
     t.indAlphaSel = alphaSel;
     t.indirect = true;
 }
 void GXSetTevIndRepeat(u32 stage) { GXSetTevIndirect(stage, 0, 0, 0, 0, 6, 6, 1, 0, 0); }
-void GXSetTevDirect(u32 stage) { Stage(stage).indirect = false; }
+void GXSetTevDirect(u32 stage) {
+    StageEdit edit(stage);
+    edit.t.indirect = false;
+}
 
 // Vertex formats and arrays
 void GXGetVtxAttrFmt(u32 fmt, u32 attr, u32* cnt, u32* type, u8* frac) {
@@ -404,16 +461,22 @@ void GXGetVtxAttrFmt(u32 fmt, u32 attr, u32* cnt, u32* type, u8* frac) {
 }
 void GXSetVtxAttrFmt(u32 fmt, u32 attr, u32 cnt, u32 type, u8 frac) {
     if (attr < kNumAttrs) {
-        g_state.vat[fmt & 7][attr] = {cnt, type, frac};
+        AttrFmt& f = g_state.vat[fmt & 7][attr];
+        if (f.cnt != cnt || f.type != type || f.frac != frac) {
+            f = {cnt, type, frac};
+            g_formatGeneration++;
+        }
     }
 }
 void GXClearVtxDesc(void) {
     std::memset(g_state.vtxDesc, 0, sizeof(g_state.vtxDesc));
     g_state.vtxDesc[kPos] = 1;
+    g_formatGeneration++;
 }
 void GXSetVtxDesc(u32 attr, u32 type) {
-    if (attr < kNumAttrs) {
+    if (attr < kNumAttrs && g_state.vtxDesc[attr] != type) {
         g_state.vtxDesc[attr] = type;
+        g_formatGeneration++;
     }
 }
 void GXSetArray(u32 attr, const void* base, u8 stride) {
@@ -424,25 +487,35 @@ void GXSetArray(u32 attr, const void* base, u8 stride) {
 }
 
 // TEV
-void GXSetTevKColor(u32 id, GXColor color) { std::memcpy(g_state.kColor[id & 3], &color, 4); }
-void GXSetTevKColorSel(u32 stage, u32 sel) { Stage(stage).kcsel = sel; }
+void GXSetTevKColor(u32 id, GXColor color) { SetBytes(g_state.kColor[id & 3], &color, 4, g_pixelGeneration); }
+void GXSetTevKColorSel(u32 stage, u32 sel) {
+    StageEdit edit(stage);
+    edit.t.kcsel = sel;
+}
+void GXSetTevKAlphaSel(u32 stage, u32 sel) {
+    StageEdit edit(stage);
+    edit.t.kasel = sel;
+}
 void GXSetTevSwapMode(u32 stage, u32 ras, u32 tex) {
-    Stage(stage).rasSwap = ras;
-    Stage(stage).texSwap = tex;
+    StageEdit edit(stage);
+    edit.t.rasSwap = ras;
+    edit.t.texSwap = tex;
 }
 void GXSetTevSwapModeTable(u32 table, u32 r, u32 g, u32 b, u32 a) {
-    uint8_t* t = g_state.swapTable[table & 3];
-    t[0] = (u8)r, t[1] = (u8)g, t[2] = (u8)b, t[3] = (u8)a;
+    const uint8_t t[4] = {(u8)r, (u8)g, (u8)b, (u8)a};
+    SetBytes(g_state.swapTable[table & 3], t, 4, g_pixelGeneration);
 }
-void GXSetNumTevStages(u8 n) { g_state.numTevStages = n; }
+void GXSetNumTevStages(u8 n) { Set(g_state.numTevStages, (uint32_t)n, g_pixelGeneration); }
 void GXSetTevOrder(u32 stage, u32 coord, u32 map, u32 color) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.texCoord = coord;
     t.texMap = (map & 0x100) ? 0xFF : map;
     t.chan = color;
 }
 void GXSetTevOp(u32 stage, u32 mode) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     TevStage preset;
     SetTevPreset(preset, stage, mode);
     std::memcpy(t.colorIn, preset.colorIn, sizeof(t.colorIn));
@@ -454,29 +527,33 @@ void GXSetTevOp(u32 stage, u32 mode) {
     t.colorOut = t.alphaOut = 0;
 }
 void GXSetTevColorIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.colorIn[0] = a, t.colorIn[1] = b, t.colorIn[2] = c, t.colorIn[3] = d;
 }
 void GXSetTevAlphaIn(u32 stage, u32 a, u32 b, u32 c, u32 d) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.alphaIn[0] = a, t.alphaIn[1] = b, t.alphaIn[2] = c, t.alphaIn[3] = d;
 }
 void GXSetTevColorOp(u32 stage, u32 op, u32 bias, u32 scale, u8 clamp, u32 out) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.colorOp = op, t.colorBias = bias, t.colorScale = scale, t.colorClamp = clamp, t.colorOut = out;
 }
 void GXSetTevAlphaOp(u32 stage, u32 op, u32 bias, u32 scale, u8 clamp, u32 out) {
-    TevStage& t = Stage(stage);
+    StageEdit edit(stage);
+    TevStage& t = edit.t;
     t.alphaOp = op, t.alphaBias = bias, t.alphaScale = scale, t.alphaClamp = clamp, t.alphaOut = out;
 }
 void GXSetAlphaCompare(u32 comp0, u8 ref0, u32 op, u32 comp1, u8 ref1) {
-    u32* a = g_state.alphaComp;
-    a[0] = comp0, a[1] = ref0, a[2] = op, a[3] = comp1, a[4] = ref1;
+    const uint32_t a[5] = {comp0, ref0, op, comp1, ref1};
+    SetBytes(g_state.alphaComp, a, sizeof(a), g_pixelGeneration);
 }
 
 // Transform
 void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
-    f32* p = g_state.projection;
+    f32 p[7];
     p[0] = (f32)type;
     p[1] = mtx[0][0];
     p[3] = mtx[1][1];
@@ -489,21 +566,24 @@ void GXSetProjection(const f32 mtx[4][4], GXProjectionType type) {
         p[2] = mtx[0][3];
         p[4] = mtx[1][3];
     }
+    SetBytes(g_state.projection, p, sizeof(p), g_vertexGeneration);
 }
 void GXGetProjectionv(f32* p) { std::memcpy(p, g_state.projection, sizeof(g_state.projection)); }
-void GXSetProjectionv(const f32* p) { std::memcpy(g_state.projection, p, sizeof(g_state.projection)); }
-void GXSetCurrentMtx(u32 id) { g_state.currentPosMtx = id; }
-void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) { std::memcpy(&g_state.xfMtx[(id & 63) * 4], mtx, 48); }
+void GXSetProjectionv(const f32* p) { SetBytes(g_state.projection, p, sizeof(g_state.projection), g_vertexGeneration); }
+void GXSetCurrentMtx(u32 id) { Set(g_state.currentPosMtx, id, g_vertexGeneration); }
+void GXLoadPosMtxImm(const f32 mtx[3][4], u32 id) { SetBytes(&g_state.xfMtx[(id & 63) * 4], mtx, 48, g_vertexGeneration); }
 void GXLoadNrmMtxImm(const f32 mtx[3][4], u32 id) {
-    f32* n = &g_state.xfNrm[(id & 31) * 3];
+    f32 n[9];
     for (int r = 0; r < 3; r++) {
         for (int c = 0; c < 3; c++) {
             n[r * 3 + c] = mtx[r][c];
         }
     }
+    SetBytes(&g_state.xfNrm[(id & 31) * 3], n, sizeof(n), g_vertexGeneration);
 }
 void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, u32 type) {
     u32 rows = type == 1 ? 2 : 3;
+    g_vertexGeneration++;
     if (id >= 64) {
         std::memcpy(&g_state.xfPostMtx[((id - 64) & 63) * 4], mtx, rows * 16);
         return;
@@ -519,62 +599,73 @@ void GXLoadTexMtxImm(const f32 mtx[][4], u32 id, u32 type) {
 }
 void GXLoadPosMtxIndx(u16 index, u32 id) {
     const u8* src = ADDR_TO_PTR(const u8, g_state.arrayBase[kPosMtxArray] + index * g_state.arrayStride[kPosMtxArray]);
-    std::memcpy(&g_state.xfMtx[(id & 63) * 4], src, 48);
+    SetBytes(&g_state.xfMtx[(id & 63) * 4], src, 48, g_vertexGeneration);
 }
 void GXSetViewport(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz) {
-    f32* v = g_state.viewport;
-    v[0] = left, v[1] = top, v[2] = wd, v[3] = ht, v[4] = nearz, v[5] = farz;
+    const f32 v[6] = {left, top, wd, ht, nearz, farz};
+    SetBytes(g_state.viewport, v, sizeof(v), g_vertexGeneration);
 }
 void GXSetViewportJitter(f32 left, f32 top, f32 wd, f32 ht, f32 nearz, f32 farz, u32) {
     GXSetViewport(left, top, wd, ht, nearz, farz);
 }
 void GXSetScissor(u32 left, u32 top, u32 wd, u32 ht) {
-    u32* s = g_state.scissor;
-    s[0] = left, s[1] = top, s[2] = wd, s[3] = ht;
+    const u32 s[4] = {left, top, wd, ht};
+    SetBytes(g_state.scissor, s, sizeof(s), g_vertexGeneration);
 }
 
 // Lighting channels and texture coordinates
-void GXSetNumChans(u8 n) { g_state.numChans = n; }
+void GXSetNumChans(u8 n) { Set(g_state.numChans, (uint32_t)n, g_vertexGeneration); }
 void GXSetChanCtrl(u32 chan, u8 enable, u32 ambSrc, u32 matSrc, u32 lightMask, u32 diffFn, u32 attnFn) {
-    ChanCtrl c = {enable != 0, ambSrc, matSrc, lightMask, diffFn, attnFn};
+    const ChanCtrl c = {enable != 0, ambSrc, matSrc, lightMask, diffFn, attnFn};
+    auto set = [&](ChanCtrl& dst) {
+        if (dst.lighting != c.lighting || dst.ambSrc != c.ambSrc || dst.matSrc != c.matSrc ||
+            dst.lightMask != c.lightMask || dst.diffFn != c.diffFn || dst.attnFn != c.attnFn) {
+            dst = c;
+            g_vertexGeneration++;
+        }
+    };
     if (chan == 4 || chan == 5) {
-        g_state.chan[chan - 4] = c;
-        g_state.chan[chan - 2] = c;
+        set(g_state.chan[chan - 4]);
+        set(g_state.chan[chan - 2]);
     } else if (chan < 4) {
-        g_state.chan[chan] = c;
+        set(g_state.chan[chan]);
     }
 }
 static void SetChanColor(u8 (*dst)[4], u32 chan, GXColor color) {
     const u8 c[4] = {color.r, color.g, color.b, color.a};
     u32 index = chan & 1;
     if (chan == 0 || chan == 1 || chan >= 4) {
-        std::memcpy(dst[index], c, 3);
+        SetBytes(dst[index], c, 3, g_vertexGeneration);
     }
     if (chan == 2 || chan == 3 || chan >= 4) {
-        dst[index][3] = c[3];
+        Set(dst[index][3], c[3], g_vertexGeneration);
     }
 }
 void GXSetChanAmbColor(u32 chan, GXColor color) { SetChanColor(g_state.ambColor, chan, color); }
 void GXSetChanMatColor(u32 chan, GXColor color) { SetChanColor(g_state.matColor, chan, color); }
-void GXSetNumTexGens(u8 n) { g_state.numTexGens = n; }
+void GXSetNumTexGens(u8 n) { Set(g_state.numTexGens, (uint32_t)n, g_vertexGeneration); }
 void GXSetTexCoordGen2(u32 dst, u32 func, u32 src, u32 mtx, u8 normalize, u32 postMtx) {
     if (dst < 8) {
-        g_state.texGen[dst] = {func, src, mtx, normalize != 0, postMtx};
+        TexGen& g = g_state.texGen[dst];
+        if (g.func != func || g.src != src || g.mtx != mtx || g.normalize != (normalize != 0) || g.postMtx != postMtx) {
+            g = {func, src, mtx, normalize != 0, postMtx};
+            g_vertexGeneration++;
+        }
     }
 }
 
 // Pixel engine
 void GXSetBlendMode(u32 type, u32 src, u32 dst, u32 op) {
-    u32* b = g_state.blend;
-    b[0] = type, b[1] = src, b[2] = dst, b[3] = op;
+    const u32 b[4] = {type, src, dst, op};
+    SetBytes(g_state.blend, b, sizeof(b), g_pixelGeneration);
 }
 void GXSetZMode(u8 enable, u32 func, u8 update) {
-    g_state.zEnable = enable != 0;
-    g_state.zFunc = func;
-    g_state.zUpdate = update != 0;
+    Set(g_state.zEnable, enable != 0, g_pixelGeneration);
+    Set(g_state.zFunc, func, g_pixelGeneration);
+    Set(g_state.zUpdate, update != 0, g_pixelGeneration);
 }
-void GXSetZCompLoc(u8 beforeTex) { g_state.zBeforeTex = beforeTex != 0; }
-void GXSetCullMode(u32 mode) { g_state.cullMode = mode; }
+void GXSetZCompLoc(u8 beforeTex) { Set(g_state.zBeforeTex, beforeTex != 0, g_pixelGeneration); }
+void GXSetCullMode(u32 mode) { Set(g_state.cullMode, mode, g_pixelGeneration); }
 // The hardware fogs by a pixel's screen depth, not its distance: the SDK packs
 // ze = A / (B - z) into registers (A and C with 11 mantissa bits, B as a 24-bit
 // mantissa and a shift), and the fog is ze - C. That is the eye distance only
@@ -611,6 +702,7 @@ void GXSetFog(u32 type, f32 startz, f32 endz, f32 nearz, f32 farz, GXColor color
     f[2] = truncate(C);
     f[3] = (f32)((expn + 1) & 0x1F);
     std::memcpy(g_state.fogColor, &color, 4);
+    g_pixelGeneration++;
 }
 
 // Drawing
@@ -624,7 +716,23 @@ void GXBegin(u32 type, u32 fmt, u16 nverts) {
 }
 void GXCallDisplayList(void* list, u32 nbytes) {
     frontline::os::SafePoint();
-    RunDisplayList(static_cast<const u8*>(list), nbytes);
+    const uint64_t start = PerfListStart();
+    // Inside a render bin's scope the Modern renderer may draw it (mesh.h).
+    if (frontline::mesh::g_bin == NATIVE_BIN_NONE || !frontline::mesh::Call(static_cast<const u8*>(list), nbytes)) {
+        RunDisplayList(static_cast<const u8*>(list), nbytes);
+    }
+    PerfListEnd(start, frontline::mesh::g_bin);
 }
 
 }  // extern "C"
+
+// The blob shadows' bin (game/native/render/blob_shadows.cpp) sets GX up its
+// own way and leaves it as it found it (native/render.h).
+static frontline::gx::State g_savedState;
+extern "C" void NativeGxSaveState(void) { g_savedState = frontline::gx::g_state; }
+extern "C" void NativeGxRestoreState(void) {
+    frontline::gx::g_state = g_savedState;
+    frontline::gx::g_formatGeneration++;
+    frontline::gx::g_pixelGeneration++;
+    frontline::gx::g_vertexGeneration++;
+}

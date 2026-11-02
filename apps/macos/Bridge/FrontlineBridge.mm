@@ -34,7 +34,12 @@ void FrontlineSetWidescreen(float aspect) { frontline::SetWidescreen(aspect); }
 void FrontlineSetHighFrameRate(bool on) { frontline::SetHighFrameRate(on); }
 void FrontlineSetMsaa(int samples) { frontline::SetMsaa(samples); }
 void FrontlineSetDrawDistance(float times) { frontline::SetDrawDistance(times); }
+void FrontlineSetModernRenderer(bool on) { frontline::SetModernRenderer(on); }
+void FrontlineSetCorrectedLighting(bool on) { frontline::SetCorrectedLighting(on); }
+void FrontlineSetBlobShadows(bool on) { frontline::SetBlobShadows(on); }
+void FrontlineSetUnfairAI(bool on) { frontline::SetUnfairAI(on); }
 void FrontlineSetFieldOfView(float degrees) { frontline::SetFieldOfView(degrees); }
+void FrontlineSetFullAutoSpringfield(bool on) { frontline::SetFullAutoSpringfield(on); }
 
 bool FrontlineStart(const char* folder, const char* cardA) {
     frontline::SetDiscRoot(folder);

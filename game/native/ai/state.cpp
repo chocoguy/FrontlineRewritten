@@ -2,7 +2,8 @@
 // what it keeps per AI object, its own randomness and tracing.
 //
 // Environment variables, read at each level start:
-//   FRONTLINE_AI=off|easy|medium|hard  off, or a profile whatever the
+//   FRONTLINE_AI=off|easy|medium|hard|unfair
+//                                      off, or a profile whatever the
 //                                      difficulty (Rewritten only)
 //   FRONTLINE_AI_TUNE=lead=1,tokens=4  profile settings by name (kTunes)
 //   FRONTLINE_AI_TRACE=1               a line per decision on stderr
@@ -29,12 +30,17 @@ namespace nai {
 
 // Starting values, to be tuned by playing. Easy keeps the original's
 // aggression (one accurate shooter at a time makes it a little gentler);
-// Medium and Hard raise it step by step.
-const Profile kProfiles[3] = {
-    // name     inacc aimCap lead reacq react prox batch tok hold miss callR callD flank adv  fwd gCool gWarn bias
-    {"easy",    1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 5.0f, 8,   1,  4.0f, 1.6f, 10.0f, 1.5f, 0,  0.0f, 0, 12.0f, 0.8f, 1},
-    {"medium",  0.9f, 1.5f, 0.4f, 1.0f, 0.75f, 6.0f, 10, 2,  4.0f, 1.3f, 20.0f, 1.0f, 1,  0.5f, 1, 9.0f,  0.5f, 1},
-    {"hard",    0.7f, 1.0f, 0.8f, 1.0f, 0.4f, 8.0f, 12,  3,  5.0f, 1.0f, 30.0f, 0.6f, 2,  1.0f, 1, 7.0f,  0.3f, 1},
+// Medium and Hard raise it step by step. Unfair replaces Hard when the setup
+// screen's Unfair AI is on: every soldier aims perfectly (aim.cpp), sees and
+// hears three times as far and keeps track of a hidden player, the whole
+// area hears the first sighting, they press in, flank and throw grenades far
+// more, and they take a third of the damage.
+const Profile kProfiles[4] = {
+    // name     inacc aimCap lead reacq react prox batch tok hold miss callR callD flank adv  fwd gCool gWarn bias perf omni sight hear damage
+    {"easy",    1.0f, 0.0f, 0.0f, 1.0f, 1.0f, 5.0f, 8,   1,  4.0f, 1.6f, 10.0f, 1.5f, 0,  0.0f, 0, 12.0f, 0.8f, 1,   0,   0,   1.0f, 1.0f, 1.0f},
+    {"medium",  0.9f, 1.5f, 0.4f, 1.0f, 0.75f, 6.0f, 10, 2,  4.0f, 1.3f, 20.0f, 1.0f, 1,  0.5f, 1, 9.0f,  0.5f, 1,   0,   0,   1.0f, 1.0f, 1.0f},
+    {"hard",    0.7f, 1.0f, 0.8f, 1.0f, 0.4f, 8.0f, 12,  3,  5.0f, 1.0f, 30.0f, 0.6f, 2,  1.0f, 1, 7.0f,  0.3f, 1,   0,   0,   1.0f, 1.0f, 1.0f},
+    {"unfair",  0.5f, 0.5f, 1.0f, 0.0f, 0.1f, 15.0f, 64, 64, 5.0f, 0.0f, 80.0f, 0.2f, 4,  2.0f, 1, 3.0f,  0.1f, 1,   1,   1,   3.0f, 3.0f, 1.0f / 3.0f},
 };
 
 Profile g_profile = kProfiles[0];
@@ -79,6 +85,11 @@ void SetTune(const char* name, float value) {
         {"grenadecooldown", &p.grenadeCooldown, NULL},
         {"grenadewarn", &p.grenadeWarn, NULL},
         {"scriptbias", NULL, &p.scriptBias},
+        {"perfectaim", NULL, &p.perfectAim},
+        {"omniscient", NULL, &p.omniscient},
+        {"sight", &p.sightScale, NULL},
+        {"hearing", &p.hearingScale, NULL},
+        {"damage", &p.damageTaken, NULL},
     };
     for (size_t i = 0; i < sizeof(tunes) / sizeof(tunes[0]); i++) {
         if (strcmp(name, tunes[i].name) == 0) {
@@ -102,12 +113,12 @@ int ProfileOverride() {
     if (strcmp(env, "off") == 0 || strcmp(env, "classic") == 0) {
         return -1;
     }
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (strcmp(env, kProfiles[i].name) == 0) {
             return i + 1;
         }
     }
-    fprintf(stderr, "FRONTLINE_AI: \"%s\" is not off, easy, medium or hard\n", env);
+    fprintf(stderr, "FRONTLINE_AI: \"%s\" is not off, easy, medium, hard or unfair\n", env);
     return 0;
 }
 
@@ -254,6 +265,8 @@ void NativeAILevelStart(int difficulty, bool multiplayer) {
     g_nativeAIOn = NativeGameMode() == NATIVE_MODE_REWRITTEN && !multiplayer && forced >= 0;
     if (forced > 0) {
         level = forced;
+    } else if (level == 3 && NativeUnfairAI()) {
+        level = 4;
     }
     g_profile = kProfiles[level - 1];
     g_level = level - 1;
@@ -300,11 +313,13 @@ void NativeAIAdded(CAIObject* ai) {
         if (g_profile.aimTimeCap > 0.0f && ai->m_aimTime > g_profile.aimTimeCap) {
             ai->m_aimTime = g_profile.aimTimeCap;
         }
+        ai->m_sightRange *= g_profile.sightScale;
+        ai->m_hearingRadius *= g_profile.hearingScale;
     }
     BSObject* script = ScriptOf(ai);
-    Trace("+ %p %s team %d kind %d inaccuracy %.2f aim time %.1f%s", ai,
+    Trace("+ %p %s team %d kind %d inaccuracy %.2f aim time %.1f sight %.0f hearing %.0f%s", ai,
           script != NULL && script->m_class != NULL ? script->m_class->m_name : "?", ai->field_0x14, ai->field_0x15,
-          ai->m_inaccuracy, ai->m_aimTime, s->roamer ? " (roamer)" : "");
+          ai->m_inaccuracy, ai->m_aimTime, ai->m_sightRange, ai->m_hearingRadius, s->roamer ? " (roamer)" : "");
 }
 
 void NativeAIRemoved(CAIObject* ai) {
@@ -325,3 +340,18 @@ int NativeAIReactionFrames(int frames) {
 float NativeAIProximityRange() { return g_profile.proximity; }
 
 int NativeAIScheduleBatch(int original) { return NativeAIOn() ? g_profile.scheduleBatch : original; }
+
+// Enemy soldiers take the profile's share of a hit's damage, at least 1.
+int NativeAIDamageTaken(ISceneNode* target, int damage) {
+    if (g_profile.damageTaken == 1.0f || damage <= 0) {
+        return damage;
+    }
+    State* s = FindByNode(target);
+    if (s == NULL || !s->soldier || !s->hostile) {
+        return damage;
+    }
+    int taken = (int)(damage * g_profile.damageTaken + 0.5f);
+    taken = taken < 1 ? 1 : taken;
+    Trace("%p takes %d of a hit's %d damage", s->ai, taken, damage);
+    return taken;
+}

@@ -24,6 +24,10 @@ enum Settings {
         return 2 * atan(tan(half) * Double(width) / 640) * 180 / .pi
     }
 
+    /// Rewritten's Full Auto Springfield: it fires for as long as the trigger
+    /// is held. Applies while the game runs.
+    static let fullAutoSpringfield = "fullAutoSpringfield"
+
     /// Pause the game when the app goes to the background (on if unset).
     static let pauseInBackground = "pauseInBackground"
 
@@ -49,6 +53,15 @@ enum Settings {
     static let msaa = "msaa"
     /// Times the level's own draw distance (Rewritten only).
     static let drawDistance = "drawDistance"
+    /// The Modern renderer: the level drawn natively (Rewritten only; 60 fps).
+    static let modernRenderer = "modernRenderer"
+    /// Modern's corrected lighting: true directional and point lights.
+    static let correctedLighting = "correctedLighting"
+    /// The blob shadows under characters (Rewritten only).
+    static let blobShadows = "blobShadows"
+    /// Unfair AI: Hard's enemies aim perfectly, sense everything, press the
+    /// attack and have three times the health (Rewritten only).
+    static let unfairAI = "unfairAI"
 
     /// How fast the main screen refreshes, in Hz.
     @MainActor static var screenRate: Int {
@@ -106,6 +119,7 @@ struct SettingsView: View {
     @AppStorage(Settings.invertMouse) private var invert = false
     @AppStorage(Settings.pauseInBackground) private var pauseInBackground = true
     @AppStorage(Settings.fieldOfView) private var fieldOfView = 70.0
+    @AppStorage(Settings.fullAutoSpringfield) private var fullAutoSpringfield = false
     @AppStorage(Settings.gameMode) private var mode = Settings.classic
     @AppStorage(Settings.widescreen) private var widescreen = false
 
@@ -125,6 +139,15 @@ struct SettingsView: View {
                 }
                 .disabled(mode != Settings.rewritten)
                 Text(fieldOfViewNote).foregroundStyle(.secondary)
+            }
+            Section("Weapons") {
+                Toggle("Full Auto Springfield",
+                       isOn: mode == Settings.rewritten ? $fullAutoSpringfield : .constant(false))
+                    .disabled(mode != Settings.rewritten)
+                Text(mode == Settings.rewritten
+                     ? "The Springfield fires for as long as the trigger is held."
+                     : "Classic keeps the original bolt action.")
+                    .foregroundStyle(.secondary)
             }
             Section("Mouse") {
                 Slider(value: $sensitivity, in: 0.1...4) {

@@ -2,7 +2,7 @@ import SwiftUI
 
 /// The setup screen before the game starts: Classic or Rewritten, and
 /// Rewritten's picture (render resolution, widescreen, frame rate,
-/// anti-aliasing, draw distance). The
+/// anti-aliasing, draw distance, renderer) and its Unfair AI. The
 /// choices hold for the whole run, since the game can't change them once it's
 /// running.
 struct SetupView: View {
@@ -14,6 +14,10 @@ struct SetupView: View {
     @AppStorage(Settings.highFrameRate) private var highFrameRate = false
     @AppStorage(Settings.msaa) private var msaa = Settings.defaultMsaa
     @AppStorage(Settings.drawDistance) private var drawDistance = Settings.defaultDrawDistance
+    @AppStorage(Settings.modernRenderer) private var modern = false
+    @AppStorage(Settings.correctedLighting) private var corrected = false
+    @AppStorage(Settings.blobShadows) private var shadows = false
+    @AppStorage(Settings.unfairAI) private var unfairAI = false
     @AppStorage(Disc.key) private var discFolder = ""
 
     private var classic: Bool { mode != Settings.rewritten }
@@ -45,11 +49,11 @@ struct SetupView: View {
                     .disabled(classic)
                     Toggle("Widescreen", isOn: classic ? .constant(false) : $widescreen)
                         .disabled(classic)
-                    Picker("Frame rate", selection: classic ? .constant(false) : $highFrameRate) {
+                    Picker("Frame rate", selection: classic || modern ? .constant(false) : $highFrameRate) {
                         Text("60 (original)").tag(false)
                         Text("Up to \(Renderer.maxRate) (experimental)").tag(true)
                     }
-                    .disabled(classic)
+                    .disabled(classic || modern)
                     Picker("Anti-aliasing", selection: classic ? .constant(1) : $msaa) {
                         Text("Off (original)").tag(1)
                         Text("4× MSAA").tag(4)
@@ -61,8 +65,29 @@ struct SetupView: View {
                         }
                     }
                     .disabled(classic)
+                    Picker("Renderer", selection: classic ? .constant(false) : $modern) {
+                        Text("GX (original)").tag(false)
+                        Text("Modern (in progress)").tag(true)
+                    }
+                    .disabled(classic)
+                    Picker("Lighting", selection: classic || !modern ? .constant(false) : $corrected) {
+                        Text("Original").tag(false)
+                        Text("Corrected").tag(true)
+                    }
+                    .disabled(classic || !modern)
+                    Picker("Shadows", selection: classic ? .constant(false) : $shadows) {
+                        Text("Off (original)").tag(false)
+                        Text("Blob").tag(true)
+                    }
+                    .disabled(classic)
                     if classic {
                         Text("Classic keeps the original picture.").foregroundStyle(.secondary)
+                    } else if modern && corrected {
+                        Text("Corrected lighting lights characters and props from the level's light directions, not from the camera.")
+                            .foregroundStyle(.secondary)
+                    } else if modern {
+                        Text("Modern draws the level, props and characters natively and lights them per pixel, at 60 fps.")
+                            .foregroundStyle(.secondary)
                     } else if highFrameRate && Settings.screenRate <= 60 {
                         Text("This screen refreshes at 60 Hz, so it shows 60 frames a second.")
                             .foregroundStyle(.secondary)
@@ -84,6 +109,15 @@ struct SetupView: View {
                     }
                 }
 
+                Section("Enemies") {
+                    Toggle("Unfair AI", isOn: classic ? .constant(false) : $unfairAI)
+                        .disabled(classic)
+                    Text(classic
+                        ? "Classic keeps the original enemies."
+                        : "On Hard: enemies aim perfectly, know where you are, attack relentlessly and have three times the health.")
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Disc") {
                     LabeledContent("Extracted disc") {
                         HStack {
@@ -96,8 +130,9 @@ struct SetupView: View {
                 }
             }
             .formStyle(.grouped)
-            .scrollDisabled(true)
-            .frame(width: 480, height: 520)
+            // Scrolls only when the window is too short for all of it.
+            .frame(width: 480)
+            .frame(minHeight: 300, idealHeight: 700, maxHeight: 700)
 
             Button(action: play) {
                 Text("Play").frame(width: 120)

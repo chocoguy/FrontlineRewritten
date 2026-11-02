@@ -51,6 +51,9 @@ final class Input {
     // read from the settings each send.
     private var lookScale = SIMD2<Float>(repeating: Input.radiansPerCount)
     private var heldButtons = Set<Int>()
+    // Pressed since the last send, so a click quicker than a frame still
+    // reaches the game (as a press).
+    private var clickedButtons = Set<Int>()
     private var ignoredButtons = Set<Int>()  // held when the capture began
     private var scroll: CGFloat = 0
     private var wheel: Int32 = 0
@@ -99,6 +102,7 @@ final class Input {
     func mouseButton(_ number: Int, down: Bool) {
         if down {
             heldButtons.insert(number)
+            clickedButtons.insert(number)
         } else {
             heldButtons.remove(number)
             ignoredButtons.remove(number)
@@ -120,6 +124,7 @@ final class Input {
         }
         captured = on
         ignoredButtons = on ? heldButtons : []
+        clickedButtons = []
         rawLook = .zero
         pointerLook = .zero
         scroll = 0
@@ -143,7 +148,7 @@ final class Input {
 
         var look = SIMD2<Float>.zero
         if captured {
-            for button in heldButtons.subtracting(ignoredButtons) {
+            for button in heldButtons.union(clickedButtons).subtracting(ignoredButtons) {
                 actions |= Bindings.mouseButtons[button] ?? 0
             }
             look = pointerOnlyLook()
@@ -152,6 +157,7 @@ final class Input {
         rawLook = .zero
         pointerLook = .zero
         wheel = 0
+        clickedButtons = []
         updateLookScale()
     }
 

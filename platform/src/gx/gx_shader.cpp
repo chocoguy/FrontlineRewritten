@@ -338,9 +338,8 @@ static float2 Wrap(float2 c, uint2 w) {
                   STAGE_WORD(s, 5), STAGE_WORD(s, 6)) \
     }
 
-fragment float4 tev_fragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]],
-                             array<texture2d<float>, 8> textures [[texture(0)]],
-                             array<sampler, 8> samplers [[sampler(0)]]) {
+// The TEV, alpha compare and fog for a pixel of `in`.
+static float4 Tev(VOut in, constant Uniforms& u, array<texture2d<float>, 8> textures, array<sampler, 8> samplers) {
     const float4 none = float4(0.0, 0.0, 1.0, 0.0);  // a coordinate that wasn't generated
     float4 texcoords[8] = {kHasTex0 ? in.tex0 : none, kHasTex1 ? in.tex1 : none, kHasTex2 ? in.tex2 : none,
                            kHasTex3 ? in.tex3 : none, kHasTex4 ? in.tex4 : none, kHasTex5 ? in.tex5 : none,
@@ -426,6 +425,156 @@ fragment float4 tev_fragment(VOut in [[stage_in]], constant Uniforms& u [[buffer
         result.rgb = mix(result.rgb, u.fogColor.rgb, f);
     }
     return result;
+}
+
+fragment float4 tev_fragment(VOut in [[stage_in]], constant Uniforms& u [[buffer(0)]],
+                             array<texture2d<float>, 8> textures [[texture(0)]],
+                             array<sampler, 8> samplers [[sampler(0)]]) {
+    return Tev(in, u, textures, samplers);
+}
+
+// Lit per pixel (the Modern renderer, platform/src/mesh/): the vertex stage
+// hands on the eye-space position and normal (as GX transforms it, not
+// renormalized, with its length) and the vertex's color 0, and the
+// channels are lit here as GX's vertex stage lights them (gx_vertex.cpp
+// LightChannel), before the TEV reads them.
+struct VOutLit {
+    float4 pos [[position]];
+    float4 tex0 [[function_constant(kHasTex0)]];
+    float4 tex1 [[function_constant(kHasTex1)]];
+    float4 tex2 [[function_constant(kHasTex2)]];
+    float4 tex3 [[function_constant(kHasTex3)]];
+    float4 tex4 [[function_constant(kHasTex4)]];
+    float4 tex5 [[function_constant(kHasTex5)]];
+    float4 tex6 [[function_constant(kHasTex6)]];
+    float4 tex7 [[function_constant(kHasTex7)]];
+    float3 eye;
+    float3 nrm;
+    float nrmLength;
+    float4 vtx;
+};
+
+struct Light {
+    float4 color;
+    float4 pos;
+    float4 dir;
+    float4 a;
+    float4 k;
+};
+
+struct LitUniforms {
+    uint4 chan[4];  // color 0, color 1, alpha 0, alpha 1: lighting | ambSrc << 1 | matSrc << 2, mask, diffFn, attnFn
+    float4 amb[2];
+    float4 mat[2];
+    uint numChans;
+    uint mode;  // 0 GX's lighting, 1 corrected (gx_shader.h LitUniforms)
+    uint numPoints;
+    uint pad;
+    Light lights[8];
+    float4 points[16][2];  // eye-space position and radius; color
+};
+
+// Components `first` to `last` of a channel (its color, its alpha, or both
+// when their controls are the same: the game sets them together).
+// Corrected lighting (lu.mode 1) takes the lights as directions, adds the
+// point lights to the color, fading to nothing at their radius as the game
+// weighs them when it picks one (CAnimated::Draw), and leaves the alpha the
+// material's.
+static void LightChannel(uint4 ctrl, int first, int last, float4 vtx, float4 regAmb, float4 regMat, float3 eye,
+                         float3 nrm, constant LitUniforms& lu, thread float4& out) {
+    constant Light* lights = lu.lights;
+    const bool corrected = lu.mode == 1;
+    const float4 mat = (ctrl.x & 4) ? vtx : regMat;
+    const float4 amb = (ctrl.x & 2) ? vtx : regAmb;
+    if (!(ctrl.x & 1)) {
+        for (int i = first; i <= last; i++) {
+            out[i] = mat[i];
+        }
+        return;
+    }
+    float4 accum = amb;
+    for (uint mask = ctrl.y & 0xFF; mask != 0; mask &= mask - 1) {
+        const Light light = lights[ctz(mask)];
+        if (corrected) {
+            const float diff = dot(normalize(light.pos.xyz), nrm);
+            accum += light.color * (ctrl.z == 2 ? max(diff, 0.0) : ctrl.z == 1 ? diff : 1.0);
+            continue;
+        }
+        float3 ldir = light.pos.xyz - eye;
+        const float dist2 = dot(ldir, ldir);
+        const float dist = sqrt(dist2);
+        ldir *= dist > 0.0 ? 1.0 / dist : 0.0;
+        float attn = 1.0;
+        if (ctrl.w == 1) {  // spot
+            const float cosAng = max(dot(ldir, light.dir.xyz), 0.0);
+            const float aattn = light.a.x + light.a.y * cosAng + light.a.z * cosAng * cosAng;
+            const float dattn = light.k.x + light.k.y * dist + light.k.z * dist2;
+            attn = max(aattn, 0.0) / (dattn != 0.0 ? dattn : 1.0);
+        } else if (ctrl.w == 0) {  // specular: the light's direction is the half angle
+            const float ndoth = max(dot(nrm, light.dir.xyz), 0.0);
+            const float aattn = light.a.x + light.a.y * ndoth + light.a.z * ndoth * ndoth;
+            const float dattn = light.k.x + light.k.y * ndoth + light.k.z * ndoth * ndoth;
+            attn = max(aattn, 0.0) / (dattn != 0.0 ? dattn : 1.0);
+            ldir = -light.dir.xyz;
+        }
+        float diff = 1.0;
+        if (ctrl.z != 0) {
+            diff = dot(ldir, nrm);
+            if (ctrl.z == 2) {
+                diff = max(diff, 0.0);
+            }
+        }
+        accum += attn * diff * light.color;
+    }
+    if (corrected && first == 0) {
+        for (uint p = 0; p < lu.numPoints; p++) {
+            const float4 at = lu.points[p][0];
+            const float3 d = at.xyz - eye;
+            const float dist2 = dot(d, d);
+            const float weight = 1.0 - dist2 / (at.w * at.w);
+            if (weight > 0.0 && dist2 > 0.0) {
+                accum.rgb += lu.points[p][1].rgb * (weight * max(dot(d * rsqrt(dist2), nrm), 0.0));
+            }
+        }
+    }
+    for (int i = first; i <= last; i++) {
+        out[i] = mat[i] * saturate(accum[i]);
+    }
+    if (corrected && last == 3) {
+        out[3] = mat[3];  // fading evenly, not lit
+    }
+}
+
+fragment float4 tev_fragment_lit(VOutLit in [[stage_in]], constant Uniforms& u [[buffer(0)]],
+                                 constant LitUniforms& lu [[buffer(1)]],
+                                 array<texture2d<float>, 8> textures [[texture(0)]],
+                                 array<sampler, 8> samplers [[sampler(0)]]) {
+    // The normal interpolated, at the length GX's had (corrected: unit length).
+    const float length = sqrt(dot(in.nrm, in.nrm));
+    const float3 nrm = length > 0.0 ? in.nrm * ((lu.mode == 1 ? 1.0 : in.nrmLength) / length) : in.nrm;
+    VOut v;
+    v.pos = in.pos;
+    float4 colors[2];
+    for (uint c = 0; c < 2; c++) {
+        colors[c] = float4(0.0);
+        if (c < lu.numChans) {
+            const float4 vtx = c == 0 ? in.vtx : float4(1.0);
+            if (all(lu.chan[c] == lu.chan[c + 2])) {
+                LightChannel(lu.chan[c], 0, 3, vtx, lu.amb[c], lu.mat[c], in.eye, nrm, lu, colors[c]);
+            } else {
+                LightChannel(lu.chan[c], 0, 2, vtx, lu.amb[c], lu.mat[c], in.eye, nrm, lu, colors[c]);
+                LightChannel(lu.chan[c + 2], 3, 3, vtx, lu.amb[c], lu.mat[c], in.eye, nrm, lu, colors[c]);
+            }
+        }
+    }
+    v.color0 = colors[0];
+    v.color1 = colors[1];
+#define TEX_IN(i) \
+    if (kHasTex##i) { \
+        v.tex##i = in.tex##i; \
+    }
+    TEX_IN(0) TEX_IN(1) TEX_IN(2) TEX_IN(3) TEX_IN(4) TEX_IN(5) TEX_IN(6) TEX_IN(7)
+    return Tev(v, u, textures, samplers);
 }
 
 struct BlitOut {

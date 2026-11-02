@@ -37,6 +37,7 @@ Prompts and menu button icons show the keyboard's keys while the keyboard and mo
 Each launch opens a setup screen in the game window (`apps/macos/Sources/SetupView.swift`):
 - **Mode:** Classic or Rewritten.
 - **Resolution**, **widescreen**, **frame rate**, **anti-aliasing** and **draw distance:** Rewritten only.
+- **Unfair AI** (user default `unfairAI`, headless `FRONTLINE_UNFAIR_AI=1`): Rewritten only; see "Enemy AI".
 - **Disc folder.**
 
 Play saves the choices (user defaults `gameMode`, `renderLines`, `widescreen`, `highFrameRate`, `msaa`, `drawDistance`) and starts the game; they hold for the whole run. The game relaunches the app between levels (`LoadElf`), and the app then skips the setup screen (`FRONTLINE_RESTART` is set) and starts with the saved settings. Headless runs use `FRONTLINE_MODE=rewritten`, `FRONTLINE_RESOLUTION=<lines>`, `FRONTLINE_WIDESCREEN=<w>:<h>`, `FRONTLINE_HFR=1`, `FRONTLINE_MSAA=4` and `FRONTLINE_DRAW_DISTANCE=<times>`.
@@ -346,8 +347,14 @@ So the GX layer records each frame's draws, and the display draws them again wit
 - **Original bugs fixed in Rewritten:** `UpdateReactionTime`'s reversed test; tank aim raised for a crouching target; the proximity check's uninitialised field of view; `ChooseTarget` keeping a dead or long-hidden target over a visible one.
 - **Left alone:** event 0x7C ("soldier fired", never raised) and the cover "high" events, whose script paths never ran.
 
+**Unfair AI** (2026-10-31; not yet playtested). A toggle on the setup screen's Enemies section (Rewritten only, `FRONTLINE_UNFAIR_AI=1` headless). On Hard, `NativeAILevelStart` picks a fourth profile, "unfair", instead of "hard"; Easy and Medium are unchanged.
+- **Perfect aim:** `NativeAIAdjustAim` puts the aim point on the target's current position plus the original's aim height and full lead, so the aim springs' lag and error drop out. Every soldier aims accurately (no attack tokens or misses), the aim error never restarts, and enemy shots leave without the weapon's spread (`NativeAIPerfectShot` in `CWeapon::FireBullet`). Shots are still limited to about 10 degrees off the gun barrel, as in the original.
+- **Awareness:** three times each enemy's sight range and hearing radius; reaction delays x0.1; a "player right there" radius of 15; every perception registration polled at once; callouts reach squadmates within 80 units after 0.2 s; and a hidden player's position stays known (aim and `m_lastSeenPosition` follow the player behind cover, although `m_targetVisible` stays honest, so the scripts still know they can't see them).
+- **Aggression:** 4 flankers, double the advance weight in cover scoring, a grenade every 3 s, a 0.1 s grenade warning, and a fourth script-bias column (charge roll x0.4, which turns 30/50/80% into about 73/100/100%; out-of-sight wait x0.2; off-cover and off-charge timers x0.2 and x0.1; fire bursts x2; waits behind cover x0.2).
+- **Three times the health:** enemy soldiers take a third of each hit's damage (at least 1) from bullets (`HandleBulletCollision`, before the one-shot-kill cheat), explosions and melee impacts (`NativeAIDamageTaken`). The scripts keep their own health numbers, so this is the robust way to triple it. Tanks and other vehicles are unchanged.
+
 **Testing:**
-- `FRONTLINE_AI=off|easy|medium|hard` (off, or a profile whatever the difficulty), `FRONTLINE_AI_TUNE=lead=1,tokens=4` (profile settings by name), `FRONTLINE_AI_TRACE=1` (a line per decision on stderr, and the line tests a second).
+- `FRONTLINE_AI=off|easy|medium|hard|unfair` (off, or a profile whatever the difficulty), `FRONTLINE_AI_TUNE=lead=1,tokens=4` (profile settings by name), `FRONTLINE_AI_TRACE=1` (a line per decision on stderr, and the line tests a second).
 - `tests/aitest` checks the geometry: the original grenade solver against the game's own integration, the 45- and 20-degree throws landing on the same spot, the arc, segment distance and the tune parsing.
 - **Checked so far (2026-10-26):**
   - The GameCube build: `regress.py` reports 0 dropped and 0 missing.
@@ -418,6 +425,49 @@ The dead no longer fade away after a few seconds; their bodies stay where they f
 - **Checked** headless on D-Day (Easy, 270 s): 87 bodies kept, the 64 cap reached and recycled, up to 30 drawn in one frame. The rifle stays visible, and bodies lie in their death poses. GameCube build unchanged (`regress.py`: 0 dropped).
   - With the 90 s hold (D-Day, 300 s): 45 bodies faded and were released. The count still levels off at about 60 there, since that many GIs die on the beach within 90 s; other levels should keep far fewer.
 - **Cost:** each body in view is re-skinned and redrawn every frame, like a live soldier, though it never moves. Caching a body's skinned pose would make bodies much cheaper if they still cost too much.
+
+### M1 Garand reloads any time (Rewritten)
+
+The Garand can be reloaded with rounds still in the clip, like the other guns. In the original it reloads only once the clip is empty.
+
+- **How the original does it.** On the reload button (the Player script, thread 0, state 0 on event 0x11, word 0xAE, the same in every level), the script reloads (state 10) when there's ammo in reserve and the clip isn't full, except for weapon 14, the Garand, which also needs an empty clip.
+- **What changes** (`game/native/script_patches.cpp`, called by `NativeScriptClassLoaded` at the end of `BSFileReadClass`). As the class loads, the 14 in that check becomes a weapon no gun is, so every gun takes the same path. A patch applies only when the words around it are the ones expected. The rounds left in the clip are kept (`CWeapon::DoneReloading` tops it up from the reserve). The reload animation is the original one.
+- **Mode:** Rewritten. Classic loads the script as it is.
+- **Checked** headless on D-Day (Easy): Rewritten reloaded the Garand at 6 and 5 rounds of 8; Classic refused the same presses. GameCube build unchanged (`regress.py`: 0 dropped).
+
+### Faster guns, true semi-automatics and Full Auto Springfield (Rewritten)
+
+The player's guns fire faster. The semi-automatics fire a shot for each trigger pull, as fast as the trigger is pulled. The Springfield can be made fully automatic in the Settings window.
+
+- **How the original does it.** Every gun fires for as long as the trigger is held, a shot each `m_refireRate` frames from the level's weapon table (`weapbul_easy/medium/hard/mp.dat`; the player's guns have the same rates in every level and single-player difficulty). So the Garand and the pistols are slow automatics, and tapping faster gains nothing.
+  - The fire button sends the Player script event 0x10 each frame it's held, and 0x94 once released. The script (state 8) plays the firing animation, whose event 0x7D calls `PlayerFireMyWeapon` and sets the weapon shooting. `CWeapon::Update` fires once the refire wait is over and sends 0x15. On 0x15 the script fires again if the button is still held; otherwise it stays in state 8 until the animation ends (about half a second for the Garand). A press during that time is lost.
+- **What changes** (`native/weapons.h`, `game/native/weapons.cpp`). The rates, in frames between shots at 60 a second:
+
+  | Weapon (type) | Original | Rewritten |
+  |---|---|---|
+  | Colt .45 (6), Walther P38 (7), silenced pistol (8), M1 Garand (14), Gewehr 43 (16) | 20, 20, 40, 30, 40 | 2, a shot a pull |
+  | Springfield (15), a bolt action | 90 | 60, or 7 with Full Auto |
+  | Thompson (20) | 4 | 3 |
+  | MP40 (21) | 5 | 4 |
+  | StG 44 (24) | 8 | 6 |
+  | BAR (25) | 9 | 7 |
+  | Shotgun (29), a pump action | 55 | 40 |
+  | Bazooka (30), Panzerschreck (32) | 200 | 140 |
+
+  - `FireBullet` and `PlayerGetWeaponRefireRate` (which times the wait before an empty gun reloads) take the rate from `NativeRefireRate`.
+  - For a semi-automatic, once a pull has fired (`NativeWeaponFired`), the held button reads as released (`NativeTriggerInput` in the player's firing), so holding it fires once. A new pull while the script is still in state 8 sends 0x10 and 0x15, so it fires at once.
+  - Quick clicks, after the user found fast clicking still slow in the app (2026-11-01):
+    - The app read the mouse buttons once a refresh, so a click that went down and up in between never reached the game. `Input.swift` now keeps a button pressed since the last send on for that send.
+    - The shot comes the frame after the press, so a click released before then lost it. A pull let go before its shot now stays on until it fires (at most 12 frames).
+  - Grenades, mounted guns and everyone else's weapons keep their rates. Multiplayer is unchanged.
+- **Full Auto Springfield:** a toggle in the Settings window's Weapons section, which applies while the game runs (`NativeFullAutoSpringfield`, `FRONTLINE_FULL_AUTO=0|1`). Held, the Springfield fires every 7 frames, restarting its bolt animation each shot.
+- **Mode:** Rewritten, single player.
+- **Checked** headless on D-Day (Easy) with the Garand:
+  - Six taps 0.15 s apart fired six shots, and four taps 0.1 s apart fired four. Holding for 2 s or 3 s fired once.
+  - Seven clicks of one frame and seven of two frames, 0.1 s apart, each fired on its click.
+  - The Garand forced to Full Auto's rate fired every 0.133 s while held, the path the Full Auto Springfield takes.
+  - Classic kept the original 0.52 s rhythm. GameCube build unchanged (`regress.py`: 0 dropped).
+  - Not checked: the automatics' new rates and the Springfield itself in play (none can be picked up early on the D-Day route), and the Settings toggle in the app.
 
 ### Pause in the background (both modes)
 
@@ -490,6 +540,333 @@ The game no longer relaunches the app between levels. The window, fullscreen and
 - Memory stays flat: 160-170 MB in each level, about 120 MB at the shell after each reboot. Before the pool fixes, with frame dumps on, it grew 1.1 MB a second.
 - The app boots from the image in its Frameworks folder.
 - The GameCube build is unchanged (`regress.py`: 0 dropped).
+
+### Modern renderer (Rewritten)
+
+Started 2026-10-30. A second renderer for Rewritten draws the world, props and characters natively, with per-pixel lighting, and brings back the blob shadows the game was designed with. Classic and Rewritten with Renderer = GX keep the GX path as it is. The plan was approved with these choices:
+- **Native meshes.** Meshes are kept on the GPU and transformed, skinned and lit there, with shaders of the renderer's own. Today the GX layer transforms and lights every vertex on the CPU, and only clip positions and lit colors reach the GPU, so per-pixel lighting can't be added at the shader level.
+- **Lighting.** Per-pixel lighting first keeps the original light model. A separate **Corrected lighting** setting switches to true directional lights: the original loads characters' unit light directions as light *positions* (`dmesh.cpp` `CPartBin::Link`), which lights them from the camera. That still has to be confirmed in Dolphin.
+- **Shadows:** blob shadows only. The GameCube version draws no shadows at all: `CCptShadowBin` is empty in retail, and `noCharacterShadows` is set. Shadow maps and SSAO are left for later.
+- **60 fps only:** the Modern renderer turns the high frame rate off.
+
+**How it fits in.** The three lit bins (`CCPTMatBin` world, `CMSHMatBin` static meshes, `CPartBin` characters and the weapon in hand) keep making their GX state calls.
+- Inside a bin's scope (`NativeMeshBin`, `native/render.h`), the renderer takes over `GXCallDisplayList`. It draws the list from a cached GPU mesh, with the GX state of the moment as its material, into the same EFB pass. Anything it can't draw falls back to GX for that call.
+- This keeps exact what later bins inherit from the GX state (decals and particles draw on it), and the bins' quirks: an untextured static mesh keeps the last texture, and `CCPTMatBin` keeps its last vertex format in a static.
+
+**Milestones:**
+- M0 groundwork
+- M1 world
+- M2 static meshes
+- M3 characters and weapon
+- M4 per-pixel lighting
+- M5 corrected lighting
+- M6 blob shadows
+- M7 performance
+
+**M0, groundwork (done 2026-10-30; nothing drawn differently):**
+- **Settings:** `SetModernRenderer`/`SetCorrectedLighting`/`SetBlobShadows` and the bridge's `FrontlineSet*`.
+  - Headless: `FRONTLINE_RENDERER=gx|modern`, `FRONTLINE_LIGHTING=original|corrected`, `FRONTLINE_SHADOWS=off|blob`.
+  - The hooks `NativeModernRender`, `NativeCorrectedLighting` and `NativeBlobShadows` are 0 in Classic. Corrected needs Modern, and Modern turns `HighFrameRate()` off.
+  - The setup screen's pickers come with the first milestone that draws something.
+- **Bin scopes:** `NativeMeshBin(NATIVE_BIN_*)` at the start and end of the three `Link`s (`platform/src/mesh/`).
+- **The seam with GX** (`gx/gx_efb.h`): the open pass and its encoders, the viewport and scissor in EFB pixels, the depth and blend state, the pipeline descriptor, and the TEV uniforms with their textures and samplers.
+  - These are factored out of `SubmitTriangles` (`FillFragUniforms`, `ViewportScissor`) and `BeginPass` (`ResetBound`), unchanged.
+- **The vertex stage** (`gx_vertex.h`):
+  - `DecodedVertex` and `DecodeVertices`, decoding without transforming.
+  - `TriangleIndices` for 16- or 32-bit indices.
+  - `ScanDisplayList` with a `ListVisitor`. It applies a list's CP and XF loads as before and hands its draws to the visitor; `RunDisplayList` is the GX visitor.
+- **`FRONTLINE_PERF`** adds the CPU time of display lists per bin ("lists: world, props, characters, viewmodel, other").
+
+**Where the CPU goes.** D-Day, in play and walking, 40 s averaged, release build on an M5:
+
+| | CPU a frame | world lists | props | characters | weapon | GPU |
+|---|---|---|---|---|---|---|
+| Classic | 6.0 ms | 2.6 | 1.0 | 0.4 | 0.8 | 1.5 |
+| 1080p, 4x MSAA, 2x draw distance | 6.4 ms | 2.6 | 1.0 | 1.0 | 0.8 | 4.0 |
+| 4K, 4x MSAA, 2x draw distance | 6.6 ms | 2.3 | 0.9 | 1.6 | 0.7 | 7.5 |
+
+The three bins' display lists are 75–85% of the game thread's CPU frame. That is the vertex stage's transform and lighting, plus copying vertices to Metal, and it's what the native meshes move to the GPU.
+
+**Checks:**
+- **Classic picture:** hashes of every frame copy (`FRONTLINE_GX_HASH`) over boot, menus and the D-Day landing, against two runs of the build before.
+  - Headless runs differ in timing, so only movies and menus repeat exactly: 1,444 copies were the same in both earlier runs.
+  - Before the level, the new build matched 1,443 of the first run's, where the two earlier runs matched each other on 1,431.
+  - The 12 later copies it missed are the landing's underwater shot, which the new run left about a second sooner (same pictures).
+- **Rewritten at 1080p:** the same comparison is in range (1,197 and 1,432 against two new-build runs' 1,199).
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+- **Lit 3D frames never repeat exactly headless,** so frame hashes can't check the native meshes. M1's comparator (`FRONTLINE_NATIVE_VERIFY`) draws each intercepted list both ways in one run and compares the pictures.
+
+**M1, the world drawn natively (done 2026-10-31).** With Renderer = Modern, the level's compartments are drawn from meshes on the GPU, and the picture is the same as GX's.
+- **The interception.** Inside the world bin's scope, `GXCallDisplayList` goes to `mesh::Call` (`platform/src/mesh/mesh_draw.mm`).
+  - The list is decoded once, as GX would run it (`ScanDisplayList` with a mesh visitor), into 40-byte vertices and 16- or 32-bit triangles. They live in 8 MB chunks of shared GPU memory; a chunk goes when no mesh in it is left.
+  - The draw goes into the same EFB pass, between GX's own draws.
+- **The vertex stage** (`mesh_shader.cpp`) is GX's `Transform` and `LightChannel` line for line, compiled without fast math. Colors go through a table of i/255, so they're exactly the floats GX's vertex stage reads.
+- **The pixels.** It writes the TEV shader's vertex output, and the pipeline uses GX's own specialized `tev_fragment` (`EfbPipeline`: a vertex variant in the shape key). So TEV, fog, alpha test and alpha to coverage are GX's code.
+- **The cache** (`mesh_cache.mm`) is keyed by the list's address. An entry is good while these are unchanged:
+  - the list's size and first 64 bytes;
+  - the vertex format, hashed again only when `g_formatGeneration` changes;
+  - any array base or stride the list reads without setting it.
+
+  A hit makes the list's array writes, as running it would.
+  - `NativeMeshForget` in `CCompartment::Init` (and `InitChunk`) forgets a compartment's lists when it streams into a reused block.
+  - `ResetMeshes` (after `ResetGx` in `reboot.cpp`) forgets all of them.
+- **Making meshes** is budgeted at 2 ms a frame; over that, GX draws the list that frame.
+- **Per-call fallback to GX:**
+  - a GX state the vertex stage doesn't do: more than two texture coordinates, or sources other than position, normal, coordinate 0 or SRTG;
+  - vertex attributes beyond position, normal, color 0 and coordinate 0;
+  - XF loads inside the list;
+  - a pipeline still compiling.
+- **Settings:** the setup screen's Renderer picker, "GX (original)" or "Modern (in progress)". Modern locks the frame rate at 60.
+- **Debugging:**
+  - `FRONTLINE_NATIVE_BINS=world,prop,character,viewmodel` (the bins done so far by default);
+  - `FRONTLINE_NATIVE_DEBUG=native` tints native draws green;
+  - `FRONTLINE_NATIVE_MESHCHECK=1` decodes every list again at each draw and reports a mesh whose data changed;
+  - `FRONTLINE_PERF` adds a "native" line: draws, fallbacks by reason, meshes made, MB of meshes.
+- **The comparator:** `FRONTLINE_NATIVE_VERIFY=1`.
+  - GX draws each intercepted list into the EFB alone (`EfbMainOnly`), and the native path draws it into the second EFB. Every other draw goes to both with the same pipeline.
+  - Each frame copy is compared, printing differing pixels, those off by more than 2 and 8, and the most.
+  - `FRONTLINE_NATIVE_VERIFY_DUMP=<folder>` writes the first frames that differ by more than 8, both pictures and their difference.
+
+**Checks:**
+- **Same picture.** With `FRONTLINE_MSAA=1 FRONTLINE_GX_ORIGINAL_FILTERING=1`, through boot, menus, the D-Day landing and walking up the beach: 11,400 frame copies compared, **none differed**. About 2,200–3,300 lists a frame were drawn natively (60–107k triangles), with no fallbacks.
+  - The comparator does see a difference: with the tint on, 1,453 copies differed, by up to 32.
+- **Reboot:** aborting the mission and replaying it rebooted in place in 4.1 ms. Native drawing resumed; 16,500 copies compared, none differed, and `MESHCHECK` found nothing stale.
+- **Streaming:** walking the beach at 1080p with 4x MSAA, `MESHCHECK` found nothing stale.
+- **`FRONTLINE_GX_VERIFY` with Modern** (native draws go to both EFBs alike): no pixel off by more than 1/255, as with GX alone.
+- **Classic unchanged:** it shares 1,432 of the pre-level frame hashes with the baseline, where the two baselines share 1,431.
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+
+**Cost.** Rewritten, 4x MSAA, 2x draw distance, D-Day walking, 40 s of play each. What's on screen differs between runs (the 1080p Modern run had more soldiers in view), so frame totals vary; the world's lists are the comparable part:
+
+| | CPU a frame | world lists | props | characters | weapon | GPU |
+|---|---|---|---|---|---|---|
+| 1080p, GX | 6.18 ms | 2.42 | 0.87 | 1.19 | 0.66 | 4.29 |
+| 1080p, Modern | 6.35 ms | 1.17 | 1.07 | 2.01 | 0.75 | 4.32 |
+| 4K, GX | 6.36 ms | 2.40 | 0.88 | 0.93 | 0.79 | 7.73 |
+| 4K, Modern | 5.73 ms | 1.14 | 0.97 | 1.44 | 0.77 | 8.11 |
+
+- **CPU:** the world's lists take half the time, about 1.25 ms a frame less.
+- **Per call:** what's left, about 0.45 µs, is taking the GX state each time (TEV uniforms and the shape key, light and matrix uniforms). M7 can skip that when nothing changed.
+- **GPU:** about the same.
+- **Memory:** 16 MB of meshes for D-Day.
+
+**M2, props drawn natively (done 2026-10-31).** Static meshes (`CMSHMatBin`) go native too:
+- props, tanks, crates and trees;
+- soldiers' attached weapons and gear;
+- thrown objects;
+- the 3D muzzle flashes.
+
+Their lists set their own arrays as the compartments' do. Everything else comes from the GX state at the call, so nothing new was needed in the renderer:
+- the model-view matrix the bin loads into slot 0 for each record;
+- the record's lights, in the original's model space;
+- an untextured chunk keeping the last material's texture and cull mode.
+
+- **Changes:**
+  - `FRONTLINE_NATIVE_BINS` now defaults to `world,prop`.
+  - `CStaticMesh::Init` forgets its lists (`NativeMeshForget`), as compartments do.
+  - The setup screen's note says what Modern draws.
+- **Faster check:** `FRONTLINE_NATIVE_VERIFY` now waits and compares only on frame copies the Modern renderer drew in. Without native draws the two EFBs are the same by construction, and waiting at every copy slowed the menus enough that a scripted route (Seaside Stowaway's) took a different path.
+
+**Checks:**
+- **D-Day,** landing and walking up the beach: 15,000 frame copies compared, none differed. `MESHCHECK` found nothing stale.
+- **Seaside Stowaway** (St. Mathieu: crates, trees, roamers): 4,200 copies with native draws compared, none differed. Nothing stale, and no fallbacks.
+  - Tinted (`FRONTLINE_NATIVE_DEBUG=native`), the crates are green with the ground and trees.
+- **Reboot and Classic:** the reset path and the GX code Classic runs are the same as M1's. The only backend change is inside the native-verify check.
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+
+**Cost.** Same route as above, Modern with world and props native, 40 s of play each. The GX rows are M1's:
+
+| | CPU a frame | world lists | props | characters | weapon | GPU |
+|---|---|---|---|---|---|---|
+| 1080p, GX | 6.18 ms | 2.42 | 0.87 | 1.19 | 0.66 | 4.29 |
+| 1080p, Modern | 5.34 ms | 1.27 | 0.24 | 1.19 | 0.97 | 3.83 |
+| 4K, GX | 6.36 ms | 2.40 | 0.88 | 0.93 | 0.79 | 7.73 |
+| 4K, Modern | 5.63 ms | 1.23 | 0.26 | 1.86 | 0.79 | 8.73 |
+
+- **CPU:** the two native bins take 1.5 ms a frame instead of 3.3.
+- **GPU** follows what's in view (the 4K Modern run had more soldiers on screen: characters 1.86 ms against 0.93).
+
+**M3, characters and the weapon drawn natively (done 2026-10-31).** `CPartBin` goes native, and with it everything lit in a level: soldiers, the kept bodies, and the weapon and hands in view. `FRONTLINE_NATIVE_BINS` now defaults to all four bins.
+- **Skinning:** the vertices keep their matrix index (PNMTXIDX). At each call, the vertex stage gets the bone matrices the bin just loaded into the position and normal slots (`GXLoadPosMtxIndx`, `GXLoadNrmMtxImm`), as GX reads them.
+  - A model's lists are shared by every soldier wearing it. Their arrays (`GXSetArray` before the call) are the inherited bases the cache checks.
+- **Morph meshes** (`dmmorph.cpp`) write a new list each frame, with positions and normals inside it (direct attributes), into alternating buffers. Such lists are never cached.
+  - Any list with direct vertex data is decoded at each draw into the frame's vertex memory, the same memory GX's own draws use (`EfbUpload`), and drawn from there (`TransientMesh`).
+  - D-Day draws up to about 10 a frame. `FRONTLINE_PERF` counts them as "transient".
+- **The weapon in hand** draws after the bin's depth-clearing copy, in the pass that begins there, like GX's draws.
+- **Fades** (the ambient alpha, `DMLightingScaleAlpha`) come through the alpha channel's lighting, as on the console.
+- **Forgetting:** `CDMesh::Init` forgets its lists, as compartments and static meshes do.
+
+**Checks:**
+- **D-Day,** landing and walking with soldiers, bodies and the rifle in view: 15,000 frame copies compared, none differed. Nothing stale, no fallbacks.
+- **Abort and replay:** reboot in 4.2 ms, then 13,800 copies, none differed. At the replayed landing about 3,900 lists a frame were drawn natively (148k triangles; the world alone was 106k).
+- **Seaside Stowaway:** 8,400 copies, none differed.
+- **Tinted:** the rifle and hands, soldiers, obstacles and ground are all green. Only the HUD is GX's.
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+
+**Cost.** Same route, every bin native, 40 s of play each. The GX rows are M1's:
+
+| | CPU a frame | all four bins' lists | world | props | characters | weapon | GPU |
+|---|---|---|---|---|---|---|---|
+| 1080p, GX | 6.18 ms | 5.14 | 2.42 | 0.87 | 1.19 | 0.66 | 4.29 |
+| 1080p, Modern | 5.08 ms | 2.76 | 1.71 | 0.39 | 0.57 | 0.09 | 4.15 |
+| 4K, GX | 6.36 ms | 5.00 | 2.40 | 0.88 | 0.93 | 0.79 | 7.73 |
+| 4K, Modern | 4.91 ms | 2.67 | 1.74 | 0.37 | 0.47 | 0.09 | 8.51 |
+
+- **CPU:** the lists take about half the time.
+- **The weapon in hand** drops most (0.7 ms to 0.09): a few big skinned lists that GX transformed and lit vertex by vertex on the CPU.
+- **Scene variance:** this run had more of the world in view than M2's (about 2,000 native draws a frame against 1,400), so its world time is higher.
+- **Worst frames** (headless hitches) are in GX's range: 23–27 ms against 21–36.
+
+**The default renderer** stays GX for now. Modern draws the same picture faster, but until per-pixel lighting (M4) there's nothing to see.
+
+**M4, per-pixel lighting (done 2026-10-31).** Modern lights lit models per pixel, with the original light model unchanged (the camera "headlight" included): characters, the weapon in hand, props, and world nodes reached by a dynamic light.
+- **The vertex stage** (`mesh_vertex_lit`) hands on three things:
+  - the eye-space position;
+  - the normal as GX transforms it, not renormalized, with its length;
+  - the vertex's color 0.
+- **The fragment stage** (`tev_fragment_lit` in `gx_shader.cpp`) normalizes the interpolated normal back to its interpolated length. That keeps GX's magnitudes: the game's s8 normals aren't unit length, and neither are scaled matrices.
+  - It runs `LightChannel` for both channels and hands the result to the same TEV code. `tev_fragment`'s body became `Tev()`, which both fragment stages call.
+  - It lights color and alpha in one pass when their controls match, as the game always sets them, and visits only the lights in the mask.
+- **Unlit draws stay per vertex,** since per pixel gives them the same result. That's most of the world (baked vertex color), plus draws with an SRTG coordinate, which needs the lit color.
+- **Pipelines:** a lit bit beside the vertex variant in the shape key picks the lit fragment stage (`EfbPipeline(…, lit)`).
+- **Debugging:**
+  - `FRONTLINE_NATIVE_LIGHTING=vertex` keeps M3's per-vertex lighting, the parity mode.
+  - `=alternate` switches between the two every 5 seconds, to compare their cost on the same picture.
+  - `FRONTLINE_NATIVE_VERIFY_DUMP_FROM=<copy>` starts the comparator's dumps at a frame copy.
+
+**Checks:**
+- **Per vertex** still matches GX exactly: 12,000 copies compared on D-Day, none differed.
+- **Per pixel** changes the lit models only. The comparator's difference images light up on the rifle, hands and soldiers, by up to 54/255 over a run, and the rest of the frame matches GX.
+  - The look: the rifle's receiver and stock show their faces a little more distinctly, with darker undersides. The change is subtle, because the original model is mostly ambient light plus a light at the camera. M5's corrected lights are the bigger change.
+- **Classic unchanged after the TEV refactor:** it shares 1,432 of the pre-level frame hashes with the baseline, where the baselines share 1,431. `FRONTLINE_GX_VERIFY` still finds nothing over 1/255.
+- No new shader or pipeline errors. No fallbacks while pipelines compiled during play.
+
+**Cost:**
+- **1080p:** GPU 4.17 ms against M3's 4.15 (D-Day walking, 40 s). CPU 4.9 ms.
+- **4K with 4x MSAA,** the worst case, as an A/B on one paused scene (`alternate`): per pixel costs 0.61 ms more GPU (8.51 against 7.90) with the rifle and arm filling much of the frame. Before lighting color and alpha in one pass it cost 0.95. That's a little over the plan's 0.5, with 60 fps unaffected.
+
+**M5, corrected lighting (done 2026-10-31).** A setting under Modern: setup screen "Lighting: Original / Corrected", or `FRONTLINE_LIGHTING=corrected`. Original stays the default.
+- **What the original does.** Characters and props get an ambient and up to three directional lights from the level's light volumes (`lightvolman.cpp`, or the level's defaults).
+  - Their directions point toward the light. Characters' are rotated into eye space (`DMLightingUpdate`); props' into model space (`UpdateLightingParams`).
+  - The bins load them with `GXInitLightPos` as *positions*, so GX takes the direction from the vertex to that point about a unit from the eye. That lights everything from the camera, a "headlight".
+  - Props also keep their normals in model space (the bin never loads a normal matrix) while their positions are in eye space.
+- **Corrected, in the lit fragment stage** (`LitUniforms.mode = 1`), for the character, weapon and prop bins:
+  - The lights are directions: diffuse is N·normalize(L), with unit normals.
+  - Props' lights are turned into eye space by the model-view matrix, and their normals come from its cofactors (`kMeshNormalsFromPosition`).
+  - A fading character's alpha is the material's, an even fade. GX lights the alpha too.
+  - The world's lights are true point lights already, so the world bin keeps GX's equation (per pixel).
+- **Point lights.** The original folds the strongest dynamic light near an object into one of its directional slots, as a direction. With Corrected that fold is skipped (`CAnimated::Draw`, `UpdateLightingParams`), and every visible scene light lights characters and props per pixel from where it is.
+  - The falloff, 1 − d²/r², is the game's own weighting when it picks one.
+  - `CScene::Draw` hands the lights over in eye space: `NativeGatherSceneLights` in `game/native/render/scene_lights.cpp`, then `NativeSceneLights`. That's up to 16.
+  - `FRONTLINE_PERF` counts them.
+- **Unchanged:** Classic and Rewritten's GX renderer, and Modern's Original lighting. Corrected needs per-pixel lighting; with `FRONTLINE_NATIVE_LIGHTING=vertex` only the skipped fold applies.
+
+**Checks:**
+- **Directions:** D-Day's key light in eye space is about (−0.82, 0.39, 0.42) for the weapon. Props' model-space light turned by their model-view comes out the same, (−0.82, 0.39, 0.43). In world space that's about 19° above the horizon, so the vectors point toward the light as read.
+- **Look:**
+  - D-Day: the rifle and hands are darker and shaded by the overcast key light, where the original lit everything facing the camera.
+  - Seaside Stowaway: the pistol's top and left take the sun, and its right side is in shade.
+- **Point lights:** D-Day and Seaside Stowaway had none in view. A test light (`FRONTLINE_NATIVE_DEBUG=pointlight`, red, at the camera) turns the hand and the gun's camera-facing faces red, as it should.
+- **Per vertex** still matches GX exactly (the comparator found no differing copy).
+- **Classic hashes unchanged.**
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+
+**Dolphin check still wanted.** Our GX lights characters from the camera, and the decomp suggests the console does too. A check in Dolphin would confirm that the Original look is the console's.
+
+**M6, blob shadows (done 2026-11-01).** A setting for Rewritten on either renderer: setup screen "Shadows: Off (original) / Blob", or `FRONTLINE_SHADOWS=blob`. Each soldier, living or dead, gets a soft shadow on the ground under him. This is the game's own design, which the GameCube version leaves out.
+- **What the game already does.** `CCharacterShadow` keeps a slab under each character, about 1 × 1 × 3 units.
+  - Its alpha fades with distance to nothing at 30 units, and is at most 0.25.
+  - `CCompartment::DrawShadows` queues each shadow with each visible compartment node its slab reaches, into the shadow bin (`CCptShadowBin`, render type 5).
+  - On the GameCube, `g_config.noCharacterShadows` is set and the bin's `Render` and `Link` are empty.
+- **Turning them on:** `NativeBlobShadowLevelStart` (end of `LoadLevelSettings`) clears `noCharacterShadows` when shadows are on.
+- **Drawing them** (`game/native/render/blob_shadows.cpp`, with plain GX calls):
+  - `Render` queues the (shadow, node) pairs (`NativeBlobShadowRender`).
+  - `Link` draws each node's chunks again over themselves (`NativeBlobShadowLink`). The blend multiplies what's there by 1 − strength, and the depth test is less-or-equal with no depth write.
+- **The strength at a pixel** is the product of four things:
+  - **The blob.** The level's shadow texture is projected straight down through the slab. A texture matrix built from the slab's box takes world positions (the compartments' positions are in world space) to 0..1 across it.
+  - **A vertical falloff.** The blob's middle column is read at the height within the slab, so a sea floor seen through water, or a ledge well above, gets nothing.
+  - **The shadow's fade.**
+  - **The alpha test.** The shadow lands only where the chunk's own texture passes the opaque bin's test (`a > 0xA0`), so a fence darkens only where it's solid.
+- **Which chunks:**
+  - Blended materials (water, glass) are skipped: darkening them would darken what's seen through them too. Natively, `InitMaterials` records each compartment material's bin in its `m_type` (2 opaque, 4 alpha).
+  - **On Modern,** the redraw is in the world bin's scope (`NativeMeshBin`), so the chunks come from the same native meshes at the same depths. A GX redraw over native world geometry could fail the depth test where the two differ by a bit.
+- **The blob texture.** D-Day's is 32 × 32 CMPR, and its strength is in its color: white in the middle, about 74 at the rim. Its alpha only marks the disk, with a hard edge.
+  - Around the disk the color isn't black. A CMPR block's transparent texels keep the average of its two colors on the console, and in our decoder.
+  - So the strength is the red (through a swap table) times the alpha. Read clamped past the slab, the edge is then empty.
+  - Taking the red alone, everything along the slab's axes picked up the edge's 73–86/255. That was a faint stripe from every soldier to the horizon (up to 27,000 pixels a frame in the boat ride).
+  - The blob is sampled nearest, with no mipmaps: Rewritten's made mipmaps and anisotropic filtering blur the disk into its edge.
+  - If a level's blob is paletted, it gets TLUT 1 (`GXInitTexObjTlut`), since the chunks' palettes go to TLUT 0.
+- **The shadow list overflow.** `CCharacterShadow::Draw` appends to the scene's list of 20 without a check. With Rewritten's kept bodies, more than 20 soldiers can be in range. Natively the list holds 96 (`NATIVE_MAX_SHADOWS`), and `Draw` stops there.
+- **GX additions:** `GXSetTevKAlphaSel`, `GXInitTexObjWrapMode`, `GXInitTexObjTlut`, and `NativeGxSaveState`/`NativeGxRestoreState`. The last two put GX's state back after the bin, so the decals that follow see what they did before.
+
+**Checks:**
+- **Modern matches GX with shadows on:** per-vertex lighting, D-Day landing and walking. 10,800 frame copies compared, none differed, so the native redraw's shadows are GX's exactly.
+- **What the shadows add** (the comparator with GX drawing the shadow bin and the native path skipping it, during the boat ride): about 115 pixels a frame, all at the soldiers' feet in the boat ahead. Before the alpha mask it was 15,000–27,000.
+- **Many soldiers:** 330 s of D-Day (the landing, then walking the beach among bodies) drew at most 14 shadows in a frame, under the original 20.
+  - To exercise the bound, a run with the limit cut to 4 kept the list at 4 for the whole run and ended normally.
+- **Look:** soft and faint by design, at most 25% darker, fading out by 30 units. In the boat ride the shadows lie under the soldiers ahead (about 115 pixels at 640 × 448).
+  - Shadows land only on level geometry, not on boats or props: those aren't compartments.
+  - An earlier test with the blob forced to full black put a black disk under a crawling soldier.
+  - The scripted beach walks never brought a soldier close, so a judgment up close is still for playing in the app.
+- **Classic unchanged:** it shares 1,433 of the pre-level frame hashes with the baseline (the baselines share 1,431).
+- **GameCube build:** unchanged (`regress.py`: 0 dropped).
+
+**Cost.** D-Day walking, 1080p, 4x MSAA, 2x draw distance, Modern, 40 s of play each:
+
+| | CPU a frame | world lists | props | characters | weapon | GPU |
+|---|---|---|---|---|---|---|
+| Shadows off | 4.97 ms | 1.67 | 0.41 | 0.50 | 0.08 | 4.10 |
+| Blob shadows | 5.53 ms | 2.03 | 0.42 | 0.57 | 0.09 | 3.96 |
+
+- **CPU:** about 0.5 ms more. The redraws are timed with the world's lists (+0.36), about 50 more native draws a frame. Each changes texture matrices or textures, so it pays the full price of taking the GX state; M7's caching of that applies here too.
+- **GPU:** no measurable change: the redraws cover small areas.
+- 60 fps in both.
+
+**M7, performance (done 2026-11-01).** The game thread was sampled during D-Day play (`sample <pid> 15` on a headless run). The native path's time went to:
+- **The vertex format's key, about 20%.** The world bin switches between 8- and 16-bit indices from chunk to chunk, and each switch hashed 2.5 KB of attribute formats again, a byte at a time.
+- **Taking the TEV state, about 25%** (`FillFragUniforms`). Most of it is checking texture contents, which is done once a frame copy for each texture, about 250 a frame.
+- **The rest:** the Metal draw (10%), building the vertex uniforms, and comparing every uniform block with what was bound.
+
+**Changes:**
+- **The format key** hashes the descriptors a word at a time. It hashes the attribute formats again only when they differ from the ones it hashed. The list guard is hashed 8 bytes at a time.
+- **Texture contents** are hashed in four lanes at once, so the multiplies overlap. The hash only tells a change, so every mode draws the same pictures. GX's own draws gain too.
+- **State counters** (`gx_state.h`): `g_pixelGeneration` and `g_vertexGeneration`.
+  - The pixel side is the TEV, textures and palettes, blend, depth, culling and fog. The vertex side is matrices, projection, viewport and scissor, channels, lights and texture coordinate generation.
+  - The GX setters advance them only when a value changes; the bins set much of the state again for each chunk, mostly to what it was.
+  - Display lists' XF loads, each frame copy (texture contents are checked again) and `NativeGxRestoreState` advance them too.
+- **Reusing taken state.** A native draw keeps what it took from the GX state, and takes a side again only when its counter moved or the draw needs it otherwise:
+  - `TakePixel`: TEV uniforms, textures and samplers, depth, culling and the pipeline.
+  - `TakeVertex`: uniforms, matrices and lights. It's also taken again for other matrix rows, mesh flags, bin, per-pixel lighting or scene lights.
+  - Bindings skip comparing what's already bound from the same take.
+- **`EfbForeign`** marks GX's bindings stale instead of clearing its 1 KB record after every native draw. GX clears it at its next draw.
+- **`FRONTLINE_NATIVE_REUSE=off|alternate`** turns the reuse off, or off and on by turns every 5 s, to measure it on one picture.
+
+**Not done:**
+- **A pipeline binary archive.** After warm-up, native draws fell back to GX for a compiling pipeline twice, once, at the level's start. Metal's own cache keeps compiled pipelines between launches. A first launch on a cold cache wasn't measured.
+- **Batching draws.** The Metal draw is now the largest single cost, about 30% of the native path.
+
+**Checks:**
+- **Comparator** (per-vertex lighting, blob shadows, D-Day landing and walking): after each step 11,400, 12,000 and 12,000 frame copies, none differed. GX always reads the live state, so a change the counters missed would show.
+- **`FRONTLINE_GX_VERIFY` with Modern** (the native path as played, with the deferred binding reset): nothing over 1/255 in 15,600 copies.
+- **Classic unchanged:** it shares 1,437, 1,436 and (final build) 1,434 of the pre-level frame hashes with the baseline (the baselines share 1,431).
+- **GameCube build:** M7 changes only `platform/`.
+
+**Cost:**
+- **Reuse, on one paused scene** (1080p, 4x MSAA, 2x draw distance; 1,994 native draws either way): the world's lists take 1.96 ms with it and 2.92 without, and CPU a frame is 4.20 ms against 5.12.
+- **Walking, against M6** (1080p, 4x MSAA, 2x draw distance, shadows off; scenes differ between runs): the four bins' lists went from 2.66 ms for 2,076 native draws (1.28 µs each) to 1.86 ms for 1,795 (1.04 µs). Over 15 s of sampling, the native path took 473 samples against 772.
+
+**The plan's check: everything on.** 4x MSAA, 2x draw distance, blob shadows and corrected lighting (GX has no corrected lighting); D-Day walking, 40 s of play each:
+
+| | fps | CPU a frame | the four bins' lists | GPU | native draws | fallbacks, meshes made |
+|---|---|---|---|---|---|---|
+| Modern, 1080p | 59.9 | 4.81 ms | 2.08 | 3.63 | 1,879 | 0, 0 |
+| Modern, 4K at 21:9 | 59.9 | 4.80 ms | 2.13 | 6.80 | 2,418 | 0, 0 |
+| GX, 4K at 21:9 | 58.8 | 8.45 ms | 7.27 | 6.22 | — | — |
+
+- **60 fps held** with Modern in both, with no fallbacks and no meshes made after warm-up.
+- **At 4K and 21:9,** the bins' lists take 2.1 ms natively against 7.3 with GX. GX also had 4 seconds with frames of 35–37 ms.
+- **The GPU** costs 0.6 ms more with Modern at 4K: per-pixel and corrected lighting.
+- **Worst frames:** the per-second worst frame is about 21 ms in every run, even at the menus with 0.5 ms of CPU. That's the headless runner's timing, not load.
 
 ## Next
 

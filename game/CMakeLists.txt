@@ -47,6 +47,10 @@ target_sources(frontline_game PRIVATE
     native/entry.cpp
     native/hint_icons.cpp
     native/prompts.cpp
+    # Rewritten's changes to the level scripts (game/bsfile.h)
+    native/script_patches.cpp
+    # Rewritten's player guns (native/weapons.h)
+    native/weapons.cpp
     # Rewritten's enhanced enemy AI (native/ai.h)
     native/ai/aim.cpp
     native/ai/cover.cpp
@@ -56,7 +60,11 @@ target_sources(frontline_game PRIVATE
     native/ai/script_bias.cpp
     native/ai/state.cpp
     # Rewritten keeps the bodies of the dead (native/corpses.h)
-    native/corpses.cpp)
+    native/corpses.cpp
+    # The Modern renderer's corrected lighting (native/lighting.h)
+    native/render/scene_lights.cpp
+    # Rewritten's blob shadows (native/shadows.h)
+    native/render/blob_shadows.cpp)
 
 set_target_properties(frontline_game PROPERTIES
     C_STANDARD 11

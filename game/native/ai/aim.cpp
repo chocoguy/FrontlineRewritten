@@ -13,6 +13,9 @@
 // - Attack tokens (director.cpp): soldiers without one aim off the player
 //   by up to their initial aim error, so only a few shoot accurately at once.
 // - Friendly fire: soldiers hold fire while a squadmate is in the way.
+// - Unfair AI: perfect aim (the aim point is where the target is now, with
+//   the original's aim height and full lead, and no weapon spread), and a
+//   hidden target's position is still known.
 
 #include "ai_internal.h"
 #include "game/AISoldierDoodad.h"
@@ -78,6 +81,11 @@ void NativeAISoldierUpdate(CAISoldierObject* ai) {
             Trace("%p lost sight of its target", ai);
         }
         ai->m_targetVisible = 0;
+        if (g_profile.omniscient && s->hostile) {
+            ai->m_lastSeenPosition.field_0x0 = target->m_position.field_0x0;
+            ai->m_lastSeenPosition.field_0x4 = target->m_position.field_0x4;
+            ai->m_lastSeenPosition.field_0x8 = target->m_position.field_0x8;
+        }
     }
 }
 
@@ -88,6 +96,12 @@ void NativeAIAdjustAim(CAIObject* ai, float dt, float dist) {
         return;
     }
     Vec3 aim = ToVec(ai->m_targetPosition);
+    if (g_profile.perfectAim) {
+        // The aim height the original added, onto the target's own position
+        // instead of the lagging track, without the aim error.
+        Vec3 height = aim - ToVec(ai->m_targetTrack.m_pos) - ToVec(ai->m_aimError.m_pos) * dist;
+        aim = ToVec(ai->m_targetVisible || g_profile.omniscient ? target->m_position : ai->m_lastSeenPosition) + height;
+    }
     if (g_profile.lead > 0.0f && ai->m_targetVisible && ai->m_bulletSpeed > 0.01f) {
         // m_velocity is per AI update; the bullet's speed per frame.
         float frames = dt * 60.0f;
@@ -100,7 +114,7 @@ void NativeAIAdjustAim(CAIObject* ai, float dt, float dist) {
         }
         aim += ToVec(target->m_velocity) * (g_profile.lead * flight / frames);
     }
-    if (g_profile.tokens > 0 && !s->token && target == PlayerAI()) {
+    if (g_profile.tokens > 0 && !g_profile.perfectAim && !s->token && target == PlayerAI()) {
         float now = Now();
         if (now >= s->missUntil) {
             s->miss = Normalized(Vec3(RandomRange(-1.0f, 1.0f), RandomRange(-1.0f, 1.0f), 0.5f * RandomRange(-1.0f, 1.0f)));
@@ -153,4 +167,12 @@ bool NativeAIKeepTarget(CAIObject* ai, CAIObject* target) {
     }
     State* s = Find(ai);
     return s == NULL || s->hiddenSince < 0.0f || Now() - s->hiddenSince < 3.0f;
+}
+
+bool NativeAIPerfectShot(ISceneNode* shooter) {
+    if (!g_profile.perfectAim) {
+        return false;
+    }
+    State* s = FindByNode(shooter);
+    return s != NULL && s->soldier && s->hostile;
 }

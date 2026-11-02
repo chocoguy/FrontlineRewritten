@@ -1,8 +1,9 @@
 // The run's settings: Classic or Rewritten, and Rewritten's picture (render
-// resolution, widescreen, high frame rate, MSAA and draw distance). The app sets them from its
+// resolution, widescreen, high frame rate, MSAA, draw distance, renderer,
+// lighting and shadows) and Unfair AI. The app sets them from its
 // setup screen before the game starts; environment variables override them,
-// for headless runs. Rewritten's field of view comes from the app's Settings
-// and can change while the game runs.
+// for headless runs. Rewritten's field of view and Full Auto Springfield come
+// from the app's Settings and can change while the game runs.
 
 #include <atomic>
 #include <cmath>
@@ -21,8 +22,12 @@ float g_aspect;
 bool g_highFrameRate;
 int g_msaa = 1;
 float g_drawDistance = 1.0f;
+bool g_modernRenderer, g_correctedLighting, g_blobShadows;
+bool g_unfairAI;
 // Degrees across at 4:3; the app's Settings change it while the game runs.
 std::atomic<float> g_fieldOfView{70.0f};
+// The app's Settings change it while the game runs too.
+std::atomic<bool> g_fullAutoSpringfield{false};
 
 // FRONTLINE_FOV=<degrees across>, or 0.
 float FieldOfViewOverride() {
@@ -34,8 +39,19 @@ float FieldOfViewOverride() {
 }
 bool g_overridden;
 
+// FRONTLINE_FULL_AUTO=0|1: 0 off, 1 on, -1 when unset.
+int FullAutoOverride() {
+    static const int on = [] {
+        const char* full = std::getenv("FRONTLINE_FULL_AUTO");
+        return full != nullptr ? (std::atoi(full) != 0 ? 1 : 0) : -1;
+    }();
+    return on;
+}
+
 // FRONTLINE_MODE, FRONTLINE_RESOLUTION, FRONTLINE_WIDESCREEN, FRONTLINE_HFR,
-// FRONTLINE_MSAA, FRONTLINE_DRAW_DISTANCE, once, over whatever the app set.
+// FRONTLINE_MSAA, FRONTLINE_DRAW_DISTANCE, FRONTLINE_RENDERER=gx|modern,
+// FRONTLINE_LIGHTING=original|corrected, FRONTLINE_SHADOWS=off|blob,
+// FRONTLINE_UNFAIR_AI=0|1, once, over whatever the app set.
 void ApplyOverrides() {
     if (g_overridden) {
         return;
@@ -60,6 +76,18 @@ void ApplyOverrides() {
     if (const char* distance = std::getenv("FRONTLINE_DRAW_DISTANCE")) {
         g_drawDistance = (float)std::atof(distance);
     }
+    if (const char* renderer = std::getenv("FRONTLINE_RENDERER")) {
+        g_modernRenderer = std::strcmp(renderer, "modern") == 0;
+    }
+    if (const char* lighting = std::getenv("FRONTLINE_LIGHTING")) {
+        g_correctedLighting = std::strcmp(lighting, "corrected") == 0;
+    }
+    if (const char* shadows = std::getenv("FRONTLINE_SHADOWS")) {
+        g_blobShadows = std::strcmp(shadows, "blob") == 0;
+    }
+    if (const char* unfair = std::getenv("FRONTLINE_UNFAIR_AI")) {
+        g_unfairAI = std::atoi(unfair) != 0;
+    }
 }
 
 bool Rewritten() {
@@ -75,10 +103,17 @@ void frontline::SetWidescreen(float aspect) { g_aspect = aspect; }
 void frontline::SetHighFrameRate(bool on) { g_highFrameRate = on; }
 void frontline::SetMsaa(int samples) { g_msaa = samples; }
 void frontline::SetDrawDistance(float times) { g_drawDistance = times; }
+void frontline::SetModernRenderer(bool on) { g_modernRenderer = on; }
+void frontline::SetCorrectedLighting(bool on) { g_correctedLighting = on; }
+void frontline::SetBlobShadows(bool on) { g_blobShadows = on; }
+void frontline::SetUnfairAI(bool on) { g_unfairAI = on; }
 
 void frontline::SetFieldOfView(float degrees) { g_fieldOfView.store(degrees, std::memory_order_relaxed); }
+void frontline::SetFullAutoSpringfield(bool on) { g_fullAutoSpringfield.store(on, std::memory_order_relaxed); }
 
-bool frontline::HighFrameRate() { return Rewritten() && g_highFrameRate; }
+// The Modern renderer draws as the game does, at 60: it has no recorded
+// frames to draw between the game's.
+bool frontline::HighFrameRate() { return Rewritten() && g_highFrameRate && NativeModernRender() == 0; }
 
 int frontline::MsaaSamples() { return Rewritten() && g_msaa >= 4 ? 4 : 1; }
 
@@ -109,6 +144,21 @@ extern "C" float NativeBaseFov(void) {
     }
     float degrees = FieldOfViewOverride() > 0 ? FieldOfViewOverride() : g_fieldOfView.load(std::memory_order_relaxed);
     return 0.5f * std::fmin(std::fmax(degrees, frontline::kMinFieldOfView), frontline::kMaxFieldOfView);
+}
+
+extern "C" int NativeModernRender(void) { return Rewritten() && g_modernRenderer ? 1 : 0; }
+
+extern "C" int NativeCorrectedLighting(void) { return NativeModernRender() != 0 && g_correctedLighting ? 1 : 0; }
+
+extern "C" int NativeBlobShadows(void) { return Rewritten() && g_blobShadows ? 1 : 0; }
+
+extern "C" int NativeUnfairAI(void) { return Rewritten() && g_unfairAI ? 1 : 0; }
+
+extern "C" int NativeFullAutoSpringfield(void) {
+    if (!Rewritten()) {
+        return 0;
+    }
+    return FullAutoOverride() >= 0 ? FullAutoOverride() : g_fullAutoSpringfield.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
 extern "C" float NativeDrawDistance(void) {

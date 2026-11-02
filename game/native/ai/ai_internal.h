@@ -19,8 +19,9 @@ class CPlayerObject;
 namespace nai {
 
 // One difficulty's settings. Easy and Medium keep the aggression ones at the
-// original game's values; Hard raises them. FRONTLINE_AI_TUNE overrides them
-// by name (kTuneNames in state.cpp).
+// original game's values; Hard raises them. Unfair (Hard with the setup
+// screen's Unfair AI) takes everything to the limit. FRONTLINE_AI_TUNE
+// overrides them by name (kTuneNames in state.cpp).
 struct Profile {
     const char* name;
     // Aim (enemies of the player only)
@@ -47,10 +48,16 @@ struct Profile {
     float grenadeWarn;     // s after a throw before soldiers near where it lands react
     // The soldier scripts' own decisions (script_bias.cpp): 0 leaves them alone
     int scriptBias;
+    // Unfair only (1 elsewhere, or 0 for the switches)
+    int perfectAim;        // aim at where the target is: no aim error, lag or weapon spread
+    int omniscient;        // a hidden target's position is still known
+    float sightScale;      // times each enemy's sight range
+    float hearingScale;    // times each enemy's hearing radius
+    float damageTaken;     // times the damage enemy soldiers take (1/3: three times the health)
 };
 
 extern Profile g_profile;
-extern int g_level;  // the profile's row: 0 easy, 1 medium, 2 hard
+extern int g_level;  // the profile's row: 0 easy, 1 medium, 2 hard, 3 unfair
 extern bool g_trace;
 
 // What the AI keeps per AI object (soldiers, tanks, the player).

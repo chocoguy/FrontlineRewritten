@@ -18,6 +18,13 @@ void SetCopySource(uint16_t left, uint16_t top, uint16_t width, uint16_t height)
 // game goes on).
 void DrawDone();
 
+// FRONTLINE_PERF: the CPU time GXCallDisplayList takes in each render bin
+// (native/render.h), the vertex stage's work that the Modern renderer moves
+// to the GPU. PerfListStart is 0 with FRONTLINE_PERF off; PerfListEnd then
+// does nothing.
+uint64_t PerfListStart();
+void PerfListEnd(uint64_t start, int bin);
+
 #ifdef __OBJC__
 // For the display (display.mm): the device and queue GX renders with, and
 // the texture GX copied into the frame buffer at `addr`, or nil if it has none

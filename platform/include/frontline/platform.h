@@ -83,12 +83,25 @@ void SetCardFolder(int slot, const char* folder);
 //     (gx_record.mm), up to the screen's refresh rate
 //   MSAA: samples a pixel, 1 (off) or 4
 //   draw distance: times the level's own (its far plane and fog), 1 to 4
+//   renderer: the Modern renderer (platform/src/mesh/) draws the world,
+//     props and characters natively, with per-pixel lighting; else GX draws
+//     everything. Modern turns the high frame rate off.
+//   corrected lighting: Modern lights with true directional lights instead
+//     of the original's (which light characters from the camera)
+//   blob shadows: the shadow under characters the game was designed with,
+//     which the GameCube version leaves out
+//   Unfair AI: Hard's enemies aim perfectly, sense everything, press the
+//     attack and take a third of the damage (game/native/ai/)
 void SetGameMode(int mode);
 void SetRenderLines(int lines);
 void SetWidescreen(float aspect);
 void SetHighFrameRate(bool on);
 void SetMsaa(int samples);
 void SetDrawDistance(float times);
+void SetModernRenderer(bool on);
+void SetCorrectedLighting(bool on);
+void SetBlobShadows(bool on);
+void SetUnfairAI(bool on);
 
 // Rewritten's field of view, in degrees across at 4:3 (the original is 70),
 // from kMinFieldOfView to kMaxFieldOfView. Unlike the settings above it can
@@ -96,6 +109,11 @@ void SetDrawDistance(float times);
 constexpr float kMinFieldOfView = 70.0f;
 constexpr float kMaxFieldOfView = 110.0f;
 void SetFieldOfView(float degrees);
+
+// Rewritten's Full Auto Springfield: the player's Springfield fires for as
+// long as the trigger is held. It can change while the game runs
+// (FRONTLINE_FULL_AUTO=0|1 overrides it).
+void SetFullAutoSpringfield(bool on);
 
 // Whether the high frame rate is on for this run (Rewritten only).
 bool HighFrameRate();

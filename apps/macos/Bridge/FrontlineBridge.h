@@ -32,9 +32,21 @@ void FrontlineSetHighFrameRate(bool on);
 void FrontlineSetMsaa(int samples);
 // Rewritten's draw distance: times the level's own far plane and fog.
 void FrontlineSetDrawDistance(float times);
+// Rewritten's Modern renderer (the world, props and characters drawn
+// natively, with per-pixel lighting; 60 fps only), its corrected lighting,
+// and the blob shadows under characters.
+void FrontlineSetModernRenderer(bool on);
+void FrontlineSetCorrectedLighting(bool on);
+void FrontlineSetBlobShadows(bool on);
+// Rewritten's Unfair AI: on Hard, enemies with perfect aim, full awareness,
+// extreme aggression and three times the health.
+void FrontlineSetUnfairAI(bool on);
 // Rewritten's field of view, degrees across at 4:3 (70, the original, to
 // 110). It can change while the game runs.
 void FrontlineSetFieldOfView(float degrees);
+// Rewritten's Full Auto Springfield: the Springfield fires for as long as the
+// trigger is held. It can change while the game runs.
+void FrontlineSetFullAutoSpringfield(bool on);
 
 // Starts the game, reading the extracted disc in `folder`, with the memory
 // card in slot A kept in `cardA` (.gci files; null for no card). Call once, on

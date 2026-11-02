@@ -49,6 +49,7 @@ final class Renderer: NSObject {
         FrontlineSetPad(0, input.read())
         // Rewritten's field of view follows the Settings window as it changes.
         FrontlineSetFieldOfView(Float(Settings.fieldOfView(.standard)))
+        FrontlineSetFullAutoSpringfield(UserDefaults.standard.bool(forKey: Settings.fullAutoSpringfield))
         input.rumble(FrontlineRumble(0))
     }
 }

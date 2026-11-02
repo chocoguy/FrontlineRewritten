@@ -43,6 +43,33 @@ struct VertexUniforms {
     float move[3][4];
 };
 
+// The lit fragment stage's (gx_shader.cpp tev_fragment_lit, the Modern
+// renderer's per-pixel lighting): the channels and lights as GX's vertex
+// stage reads them, and for corrected lighting (mode 1) the scene's point
+// lights. 1296 bytes.
+struct LitLight {
+    float color[4];
+    float pos[4];
+    float dir[4];
+    float a[4];
+    float k[4];
+};
+struct LitUniforms {
+    uint32_t chan[4][4];  // color 0, color 1, alpha 0, alpha 1: lighting | ambSrc << 1 | matSrc << 2, mask, diffFn, attnFn
+    float amb[2][4];      // register colors, 0..1
+    float mat[2][4];
+    uint32_t numChans;
+    // 0: GX's lighting. 1: corrected: the lights' positions are directions
+    // toward them in eye space, normals are unit length, and the point
+    // lights light the color channels too.
+    uint32_t mode;
+    uint32_t numPoints;
+    uint32_t pad;
+    LitLight lights[8];
+    float points[16][2][4];  // eye-space position and radius; color
+};
+static_assert(sizeof(LitUniforms) == 1296);
+
 extern const char kShaderSource[];
 
 }  // namespace frontline::gx

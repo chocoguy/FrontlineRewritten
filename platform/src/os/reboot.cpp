@@ -149,6 +149,7 @@ void* Rebooter(void*) {
     ResetCard();
     ResetAlarms();
     ResetGx();
+    ResetMeshes();
     ResetThreads();
     RestoreMemoryState();
     RestoreArena();

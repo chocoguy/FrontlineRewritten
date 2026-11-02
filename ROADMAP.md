@@ -109,7 +109,7 @@ Rewritten mode unless marked otherwise.
 - **Textures:** HD texture replacement. Using Dolphin's texture-hash naming means existing Dolphin packs would load.
 - **Visuals and quality of life:** longer draw distance (done 2026-10-27: 2x or 4x the level's far plane and fog), a field of view setting (done 2026-10-30: 70° to 110°, live), skippable intros, checkpoint restart.
 - **Platform quality of life (both modes, done 2026-10-30):** the game pauses when the app goes to the background, and the display stays awake while it runs.
-- **Optional:** move the world and character rendering off the GameCube-style path onto a modern Metal renderer, for per-pixel lighting and shadows.
+- **Modern renderer (done 2026-11-01, started 2026-10-30):** the world, props and characters drawn natively from meshes kept on the GPU, with per-pixel lighting, an optional corrected light model, and the blob shadows the game was designed with (the GameCube version draws none). 60 fps only. Everything lit in a level (world, props, characters, the weapon in hand) is drawn natively (2026-10-31) with about half the CPU, and lit per pixel, with the original light model or (a setting) corrected directional and point lights. Blob shadows under every soldier are a setting on either renderer, and reusing unchanged GX state cut the native path's CPU time by a third (2026-11-01). The setup screen still defaults to GX. See [Modern renderer](docs/port/phase2-status.md#modern-renderer-rewritten).
 
 ### Phase 3 — iPhone, iPad and Apple TV (M)
 - Same game code, new app shells.
