@@ -1,10 +1,7 @@
 # The macOS app: a SwiftUI window with the game's Metal view, keyboard, mouse
-# and game controller input, and a Settings window. Swift reaches the game through Bridge/ (its bridging
-# header), a small Objective-C++ library over the game and the platform layer.
-
-add_library(frontline_bridge STATIC Bridge/FrontlineBridge.mm)
-set_source_files_properties(Bridge/FrontlineBridge.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
-target_link_libraries(frontline_bridge PUBLIC frontline_game_host)
+# and game controller input, and a Settings window. Swift reaches the game
+# through the shared bridge (apps/shared/Bridge), and compiles in the shared
+# Swift sources (frontline_swift_app).
 
 set(FRONTLINE_BUNDLE_ID "io.github.chocoguy.FrontlineRewritten"
     CACHE STRING "Bundle identifier for the macOS app")
@@ -35,21 +32,9 @@ set_target_properties(FrontlineMac PROPERTIES
     XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${CMAKE_CURRENT_SOURCE_DIR}/FrontlineMac.entitlements"
     XCODE_GENERATE_SCHEME ON)
 
-# Swift 6 language mode. The Xcode generator would turn Swift_LANGUAGE_VERSION
-# into a -swift-version flag next to SWIFT_VERSION = 4.0, and Xcode warns that
-# they disagree, so Xcode gets its own build setting instead.
-set(_bridging_header "${CMAKE_CURRENT_SOURCE_DIR}/Bridge/FrontlineBridge.h")
-if(CMAKE_GENERATOR STREQUAL "Xcode")
-    set_target_properties(FrontlineMac PROPERTIES
-        XCODE_ATTRIBUTE_SWIFT_VERSION 6.0
-        XCODE_ATTRIBUTE_SWIFT_OBJC_BRIDGING_HEADER "${_bridging_header}")
-else()
-    set_target_properties(FrontlineMac PROPERTIES Swift_LANGUAGE_VERSION 6)
-    target_compile_options(FrontlineMac PRIVATE "SHELL:-import-objc-header ${_bridging_header}")
-endif()
+frontline_swift_app(FrontlineMac)
 
 # The game image goes in the app's Frameworks folder (Bridge finds it there).
-add_dependencies(FrontlineMac frontline_game)
 add_custom_command(TARGET FrontlineMac POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_BUNDLE_CONTENT_DIR:FrontlineMac>/Frameworks"
     COMMAND "${CMAKE_COMMAND}" -E copy "$<TARGET_FILE:frontline_game>" "$<TARGET_BUNDLE_CONTENT_DIR:FrontlineMac>/Frameworks/"
@@ -57,7 +42,6 @@ add_custom_command(TARGET FrontlineMac POST_BUILD
     VERBATIM)
 
 target_link_libraries(FrontlineMac PRIVATE
-    frontline_bridge
     "-framework AppKit"
     "-framework CoreHaptics"
     "-framework GameController"

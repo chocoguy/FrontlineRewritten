@@ -1,6 +1,8 @@
 // The DSP's output to the speakers: 32 kHz stereo frames from the AX mixer
-// (audio.cpp) into a buffer that Core Audio's default output unit plays,
-// converting to the device's rate.
+// (audio.cpp) into a buffer that Core Audio's output unit plays (the default
+// output on macOS, RemoteIO on tvOS), converting to the device's rate. On tvOS
+// the unit plays through the shared audio session (audio_session.mm), and
+// restarts with an empty buffer after interruptions and route changes.
 //
 // The mixer runs on the game's 5 ms clock, the device on its own, so the
 // buffer absorbs the difference: playback waits for kPrime frames before it
@@ -10,14 +12,19 @@
 // FRONTLINE_AUDIO_DUMP=<file.wav> also records everything mixed.
 
 #include <AudioToolbox/AudioToolbox.h>
+#include <TargetConditionals.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 #include "audio_out.h"
+#if !TARGET_OS_OSX
+#include "audio_session.h"
+#endif
 
 namespace {
 
@@ -30,7 +37,7 @@ bool g_enabled = true;
 AudioComponentInstance g_unit;
 float g_ring[kCapacity][2];
 std::atomic<uint32_t> g_write, g_read;  // frame counts; the ring index is the count mod kCapacity
-bool g_playing;                         // render thread only
+bool g_playing;                         // render thread only, or while the unit is stopped
 std::atomic<uint32_t> g_underruns, g_drops;
 
 OSStatus Render(void*, AudioUnitRenderActionFlags* flags, const AudioTimeStamp*, UInt32, UInt32 frames,
@@ -73,7 +80,11 @@ void Fail(const char* what, OSStatus status) {
 void OpenDevice() {
     AudioComponentDescription desc = {};
     desc.componentType = kAudioUnitType_Output;
+#if TARGET_OS_OSX
     desc.componentSubType = kAudioUnitSubType_DefaultOutput;
+#else
+    desc.componentSubType = kAudioUnitSubType_RemoteIO;
+#endif
     desc.componentManufacturer = kAudioUnitManufacturer_Apple;
     AudioComponent component = AudioComponentFindNext(nullptr, &desc);
     OSStatus status = component != nullptr ? AudioComponentInstanceNew(component, &g_unit) : -1;
@@ -107,6 +118,57 @@ void OpenDevice() {
         return Fail("starting", status);
     }
 }
+
+#if !TARGET_OS_OSX
+// The audio session's events. They come from its notifications' threads,
+// while the game thread keeps queueing frames. Opening the unit may post one
+// on the opening thread itself, hence the recursive lock; an event that finds
+// the unit still being opened leaves it alone.
+std::recursive_mutex g_sessionLock;
+bool g_opening;
+
+void OpenDeviceLocked() {
+    g_opening = true;
+    OpenDevice();
+    g_opening = false;
+}
+
+void SessionStop() {
+    std::lock_guard<std::recursive_mutex> lock(g_sessionLock);
+    if (g_unit != nullptr && !g_opening) {
+        AudioOutputUnitStop(g_unit);
+    }
+}
+
+void SessionRestart() {
+    std::lock_guard<std::recursive_mutex> lock(g_sessionLock);
+    if (g_unit == nullptr || g_opening) {
+        return;
+    }
+    AudioOutputUnitStop(g_unit);
+    // What was queued before the break is stale. The render thread is
+    // stopped, so its state can be reset from here.
+    g_read.store(g_write.load(std::memory_order_acquire), std::memory_order_release);
+    g_playing = false;
+    if (OSStatus status = AudioOutputUnitStart(g_unit); status != noErr) {
+        std::fprintf(stderr, "frontline: audio output: restarting failed (%d)\n", (int)status);
+    }
+}
+
+void SessionReopen() {
+    std::lock_guard<std::recursive_mutex> lock(g_sessionLock);
+    if (g_opening) {
+        return;
+    }
+    AudioComponentInstance old = g_unit;
+    g_read.store(g_write.load(std::memory_order_acquire), std::memory_order_release);
+    g_playing = false;
+    OpenDeviceLocked();
+    if (old != nullptr) {
+        AudioComponentInstanceDispose(old);
+    }
+}
+#endif
 
 // FRONTLINE_AUDIO_DUMP: a 16-bit stereo WAV file, its sizes kept current.
 FILE* g_dump;
@@ -165,7 +227,16 @@ void StartOutput() {
     started = true;
     OpenDump();
     if (g_enabled && std::getenv("FRONTLINE_NO_AUDIO") == nullptr) {
+#if !TARGET_OS_OSX
+        if (!BeginSession({SessionStop, SessionRestart, SessionReopen})) {
+            std::fprintf(stderr, "frontline: audio output: no audio session; continuing without sound\n");
+            return;
+        }
+        std::lock_guard<std::recursive_mutex> lock(g_sessionLock);
+        OpenDeviceLocked();
+#else
         OpenDevice();
+#endif
     }
 }
 

@@ -1,5 +1,5 @@
-// The game as the Swift app sees it (its bridging header). Plain C and
-// Objective-C, so Swift can import it.
+// The game as the Swift apps (macOS and tvOS) see it: their bridging header.
+// Plain C and Objective-C, so Swift can import it.
 #pragma once
 
 #import <Metal/Metal.h>
@@ -54,6 +54,11 @@ void FrontlineSetFullAutoSpringfield(bool on);
 // image couldn't be loaded.
 bool FrontlineStart(const char* folder, const char* cardA);
 
+// Called after each change to a memory card's files: the .gci at `path` was
+// written in full, or `removed`. It runs on a game thread and must return at
+// once. Set before FrontlineStart.
+void FrontlineSetCardChangeCallback(void (*callback)(const char* path, bool removed));
+
 // The device the game renders with; the view has to use it.
 id<MTLDevice> FrontlineDevice(void);
 
@@ -61,6 +66,10 @@ id<MTLDevice> FrontlineDevice(void);
 // is when it will be on screen (a display link's target presentation time,
 // in CACurrentMediaTime's seconds). Call from one thread, once a refresh.
 void FrontlinePresent(id<CAMetalDrawable> drawable, double time);
+
+// How much of the drawable the picture fits in, centered: 1 (all of it) down
+// to 0.5, for TVs that crop the edges (overscan). It can change at any time.
+void FrontlineSetPictureSize(float share);
 
 // A GameCube controller's state (the SDK's PADStatus): buttons, sticks in
 // about -100..100 (up and right positive), and analog triggers in 0..255.
@@ -141,6 +150,9 @@ void FrontlineAddMouseLook(int port, float lookRight, float lookUp);
 // One press of `actions` at the game's next look, as if keys bound to them were
 // tapped. Pause does nothing unless the player is playing.
 void FrontlinePressAction(int port, uint32_t actions);
+// The actions controller `port`'s buttons are bound to (the controller
+// bindings), held now. Prompts stay the controller's.
+void FrontlineSetPadActions(int port, uint32_t actions);
 
 // Whether controller 1's player is playing (in a level, not paused, no menu
 // up): the mouse looks around then.

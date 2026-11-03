@@ -1,4 +1,4 @@
-// The Swift app's calls into the game and the platform layer.
+// The Swift apps' calls into the game and the platform layer.
 
 #include "FrontlineBridge.h"
 
@@ -56,9 +56,15 @@ bool FrontlineStart(const char* folder, const char* cardA) {
     return true;
 }
 
+void FrontlineSetCardChangeCallback(void (*callback)(const char* path, bool removed)) {
+    frontline::SetCardChangeCallback(callback);
+}
+
 id<MTLDevice> FrontlineDevice(void) { return frontline::MetalDevice(); }
 
 void FrontlinePresent(id<CAMetalDrawable> drawable, double time) { frontline::Present(drawable, time); }
+
+void FrontlineSetPictureSize(float share) { frontline::SetPictureSize(share); }
 
 void FrontlineSetPad(int port, FrontlinePad pad) {
     PADStatus status = {};
@@ -130,6 +136,8 @@ void FrontlineSetKeyboardMouse(int port, uint32_t actions, float lookRight, floa
 void FrontlineAddMouseLook(int port, float lookRight, float lookUp) { frontline::AddMouseLook(port, lookRight, lookUp); }
 
 void FrontlinePressAction(int port, uint32_t actions) { frontline::PressAction(port, actions); }
+
+void FrontlineSetPadActions(int port, uint32_t actions) { frontline::SetPadActions(port, actions); }
 
 bool FrontlineIsPlaying(void) { return frontline::IsPlaying(); }
 

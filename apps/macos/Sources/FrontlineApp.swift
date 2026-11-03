@@ -71,18 +71,7 @@ enum Game {
         guard let disc = Disc.locate() else {
             return false
         }
-        let defaults = UserDefaults.standard
-        let rewritten = defaults.string(forKey: Settings.gameMode) == Settings.rewritten
-        FrontlineSetGameMode(Int32(rewritten ? FrontlineModeRewritten : FrontlineModeClassic))
-        FrontlineSetRenderLines(Int32(Settings.renderLines(defaults)))
-        FrontlineSetWidescreen(defaults.bool(forKey: Settings.widescreen) ? Float(Settings.screenAspect) : 0)
-        FrontlineSetHighFrameRate(defaults.bool(forKey: Settings.highFrameRate))
-        FrontlineSetMsaa(Int32(Settings.msaa(defaults)))
-        FrontlineSetDrawDistance(Float(Settings.drawDistance(defaults)))
-        FrontlineSetModernRenderer(defaults.bool(forKey: Settings.modernRenderer))
-        FrontlineSetCorrectedLighting(defaults.bool(forKey: Settings.correctedLighting))
-        FrontlineSetBlobShadows(defaults.bool(forKey: Settings.blobShadows))
-        FrontlineSetUnfairAI(defaults.bool(forKey: Settings.unfairAI))
+        Settings.apply(.standard, aspect: Settings.screenAspect)
         Input.publishKeyLabels()
         guard FrontlineStart(disc, MemoryCard.folder()) else {
             let alert = NSAlert()

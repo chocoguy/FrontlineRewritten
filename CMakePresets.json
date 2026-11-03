@@ -24,12 +24,39 @@
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/release",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "tvos",
+      "displayName": "tvOS device (Xcode)",
+      "description": "Apple TV build; pass -DFRONTLINE_DEVELOPMENT_TEAM=<Team ID> to sign for a device",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/tvos",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "tvOS",
+        "CMAKE_OSX_SYSROOT": "appletvos"
+      }
+    },
+    {
+      "name": "tvos-sim",
+      "displayName": "tvOS simulator (Xcode)",
+      "description": "Apple TV simulator build; no signing needed. The disc isn't bundled: launch with FRONTLINE_DISC",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/tvos-sim",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "tvOS",
+        "CMAKE_OSX_SYSROOT": "appletvsimulator",
+        "FRONTLINE_DISC_IN_BUNDLE": "OFF"
+      }
     }
   ],
   "buildPresets": [
     { "name": "xcode", "configurePreset": "xcode", "configuration": "Debug" },
     { "name": "xcode-release", "configurePreset": "xcode", "configuration": "RelWithDebInfo" },
     { "name": "ninja", "configurePreset": "ninja" },
-    { "name": "release", "configurePreset": "release" }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "tvos", "configurePreset": "tvos", "configuration": "Debug" },
+    { "name": "tvos-release", "configurePreset": "tvos", "configuration": "RelWithDebInfo" },
+    { "name": "tvos-sim", "configurePreset": "tvos-sim", "configuration": "Debug" },
+    { "name": "tvos-sim-release", "configurePreset": "tvos-sim", "configuration": "RelWithDebInfo" }
   ]
 }

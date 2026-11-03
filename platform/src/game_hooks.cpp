@@ -6,11 +6,14 @@
 // keeps (LoadElf). Natively the game reboots in place (os/reboot.cpp), the
 // block kept where it is. With FRONTLINE_RESTART_EXEC=1 (or without a game
 // image) the process execs itself instead, with the block in a temporary file
-// named by FRONTLINE_RESTART.
+// named by FRONTLINE_RESTART. tvOS can't exec, so there the in-place reboot is
+// the only way.
 
+#include <TargetConditionals.h>
 #include <crt_externs.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -32,6 +35,21 @@ frontline::GameMain frontline::LoadGame(const char* path) {
         std::fprintf(stderr, "frontline: no game image at %s\n", path);
         return nullptr;
     }
+#if !TARGET_OS_OSX
+    // A tvOS app writes to its Caches (the bundle is read-only, and there's
+    // no lasting local storage), so relative paths (the FRONTLINE_*_DUMP
+    // folders, GX snapshots) go there, where `devicectl device copy from`
+    // finds them. HOME is the app's container. This runs before the game
+    // image loads, since its code reads those paths.
+    if (const char* home = std::getenv("HOME")) {
+        char caches[4096];
+        std::snprintf(caches, sizeof(caches), "%s/Library/Caches", home);
+        mkdir(caches, 0755);
+        if (chdir(caches) != 0) {
+            std::perror("frontline: working folder");
+        }
+    }
+#endif
     // The address map finds the image by its name as its initializers run.
     g_gameImagePath = resolved;
     ForgetImages();
@@ -78,6 +96,7 @@ void LoadElf::RunModule(const char* name) {
         std::fprintf(stderr, "frontline: rebooting in place (the console boots %s)\n", name);
         frontline::os::Reboot();
     }
+#if TARGET_OS_OSX
     std::fprintf(stderr, "frontline: restarting (the console boots %s)\n", name);
     char path[] = "/tmp/frontline-restart-XXXXXX";
     int fd = mkstemp(path);
@@ -92,6 +111,10 @@ void LoadElf::RunModule(const char* name) {
         execv(exe, *_NSGetArgv());
     }
     std::perror("frontline: restart");
+#else
+    std::fprintf(stderr, "frontline: can't reboot in place to boot %s, and this platform can't restart the process\n",
+                 name);
+#endif
     std::exit(1);
 }
 

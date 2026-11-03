@@ -10,7 +10,8 @@
 // alignment, the icon offsets in CARDStat, timestamps) follow the SDK.
 //
 // Each change rewrites the whole file through a temporary and a rename, so a
-// crash never leaves half a save. Allocation is plain malloc: on game threads
+// crash never leaves half a save, and is reported to the app
+// (SetCardChangeCallback). Allocation is plain malloc: on game threads
 // operator new belongs to the game.
 
 #include <dirent.h>
@@ -71,6 +72,13 @@ struct Card {
 };
 
 Card g_cards[2];
+frontline::CardChangeCallback g_changed;
+
+void Changed(const char* path, bool removed) {
+    if (g_changed != nullptr) {
+        g_changed(path, removed);
+    }
+}
 
 u32 Get16(const u8* p) { return (u32)p[0] << 8 | p[1]; }
 u32 Get32(const u8* p) { return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3]; }
@@ -243,6 +251,7 @@ bool WriteGci(const File& f, const u8* blocks) {
         std::remove(temp);
         return false;
     }
+    Changed(f.path, false);
     return true;
 }
 
@@ -412,6 +421,8 @@ void HostPath(const Card& card, const Dir& d, char* path) {
 
 }  // namespace
 
+void frontline::SetCardChangeCallback(CardChangeCallback callback) { g_changed = callback; }
+
 void frontline::SetCardFolder(int slot, const char* folder) {
     if (slot < 0 || slot > 1) {
         return;
@@ -496,8 +507,12 @@ s32 CARDFormatAsync(s32 chan, CARDCallback callback) {
     }
     s32 result = CARD_RESULT_READY;
     for (File& f : card->files) {
-        if (f.used && std::remove(f.path) != 0) {
-            result = CARD_RESULT_IOERROR;
+        if (f.used) {
+            if (std::remove(f.path) != 0) {
+                result = CARD_RESULT_IOERROR;
+            } else {
+                Changed(f.path, true);
+            }
         }
         f.used = false;
     }
@@ -641,6 +656,7 @@ s32 CARDDelete(s32 chan, const char* fileName) {
     if (std::remove(f.path) != 0) {
         return Finish(card, CARD_RESULT_IOERROR, nullptr, chan);
     }
+    Changed(f.path, true);
     f.used = false;
     return Finish(card, CARD_RESULT_READY, nullptr, chan);
 }

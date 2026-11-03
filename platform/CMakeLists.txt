@@ -53,3 +53,10 @@ set_source_files_properties(src/gx/display.mm src/gx/gx_metal.mm src/gx/gx_recor
 target_link_libraries(frontline_platform PUBLIC
     "-framework AudioToolbox" "-framework Metal" "-framework QuartzCore" "-framework Foundation"
     "-framework CoreGraphics" "-framework CoreText")
+
+# tvOS plays through the shared audio session.
+if(FRONTLINE_TVOS)
+    target_sources(frontline_platform PRIVATE src/audio_session.mm)
+    set_source_files_properties(src/audio_session.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(frontline_platform PUBLIC "-framework AVFAudio")
+endif()

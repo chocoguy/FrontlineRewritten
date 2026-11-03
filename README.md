@@ -11,12 +11,14 @@ This repository contains **no game data**. You need your own copy of the game (U
 - The game runs natively from your disc in a macOS window: menus, movies, every mission, with sound and memory card saves.
 - The data checker validates the converted loaders against your disc (12 big-endian formats).
 - Mouse and keyboard controls, in both Classic and Rewritten.
-- Details: [docs/port/phase1-status.md](docs/port/phase1-status.md), [docs/port/phase2-status.md](docs/port/phase2-status.md).
+- **The Apple TV port is done** (Phase 3): the same game on an Apple TV 4K (A15 or newer), with game controllers, button rebinding, split screen and iCloud saves. See [Apple TV](#apple-tv) to install it.
+- Details: [docs/port/phase1-status.md](docs/port/phase1-status.md), [docs/port/phase2-status.md](docs/port/phase2-status.md), [docs/port/phase3-status.md](docs/port/phase3-status.md).
 - The GameCube build stays unchanged.
 
 ## Requirements
 
 - macOS 27 on Apple silicon, with Xcode 27
+- For the Apple TV app: the tvOS 27 SDK, a paid Apple Developer Program membership and an Apple TV 4K with an A15 or newer ([Apple TV](#apple-tv))
 - CMake 3.31 or later, Ninja and Python 3: `brew install cmake ninja`
 
 ## Setup
@@ -96,6 +98,7 @@ While you play, the window captures the mouse pointer; it's let go when the game
 - **Field of view:** 70° (the original) to 110°, across at 4:3; widescreen widens it further. Rewritten only.
 - **Mouse:** look speed and inverted look.
 - **Keyboard and mouse:** rebind each in-level action to up to two keys or mouse buttons (the side buttons too); the menu keys stay as above. Prompts name your keys from the next screen or level.
+- **Game controller:** Controller Buttons… sets what each button of your kind of controller does: a GameCube button, a game action the GameCube controller has no button for (melee, reload, previous weapon and others), or nothing. It can also swap the sticks or invert either one's up and down. Applies at once; on the Apple TV it's under Controls on the setup screen, and each controller there plays on a port of its own.
 
 **Data check:** loads the converted file formats from your disc through the native loaders and validates them:
 
@@ -133,6 +136,72 @@ python3 tools/build_report.py
 
 Add `--sizes` to list the structs whose native layout differs from the GameCube's.
 
+## Apple TV
+
+The tvOS app (`apps/ios`) plays the same game on an **Apple TV 4K with an A15 chip or newer** (3rd generation onward), running tvOS 27, with game controllers. **Your disc is built into the app**, since tvOS keeps nothing on disk for good, so you build and install it yourself, for your own Apple TV.
+
+**You need:**
+- A paid Apple Developer Program membership. A free account can't use iCloud, and its installs expire after 7 days.
+- The Mac setup above, with the tvOS 27 SDK in Xcode (Xcode → Settings → Components).
+- Your extracted disc in `FrontlineDecompiled/orig/GMFE69/disc`, or set `-DFRONTLINE_DISC_DIR=<folder>`.
+- A Bluetooth game controller paired with the Apple TV (Settings → Remotes and Devices → Bluetooth). Xbox, PlayStation and MFi controllers all work. The Siri Remote only works the menus.
+
+**One-time setup:**
+1. **Your team:** sign in to Xcode with your developer account (Xcode → Settings → Accounts). Your **Team ID** is on developer.apple.com → Account → Membership details.
+2. **An App ID with iCloud,** on developer.apple.com → Certificates, Identifiers & Profiles:
+   - Under Identifiers, add an **App ID**: explicit, with a bundle ID of your own, such as `com.yourname.FrontlineRewritten`. Turn on **iCloud** with **CloudKit**.
+   - Under iCloud Containers, add **`iCloud.<that bundle ID>`**. Back in the App ID, click iCloud's **Configure** and assign the container to it.
+   - Nothing else needs turning on. Xcode makes the signing profiles itself when you build.
+3. **Pair the Apple TV with Xcode:**
+   - The Apple TV and the Mac have to be on the same network.
+   - On the Apple TV, open Settings → Remotes and Devices → Remote App and Devices.
+   - In Xcode, open Window → Devices and Simulators, pick the Apple TV and click Pair. Enter the code it shows.
+   - If the Apple TV asks to turn on Developer Mode, accept.
+
+**Build and install** (from the repository root; use your own Team ID, bundle ID and Apple TV name):
+
+```sh
+cmake --preset tvos -DFRONTLINE_DEVELOPMENT_TEAM=<Team ID> -DFRONTLINE_TV_BUNDLE_ID=<bundle ID>
+cmake --build --preset tvos-release -- -sdk appletvos -allowProvisioningUpdates
+xcrun devicectl device install app --device "<Apple TV name>" build/tvos/apps/ios/RelWithDebInfo-appletvos/FrontlineTV.app
+```
+
+`-allowProvisioningUpdates` lets Xcode register the Apple TV and create the profiles with your account. The app is about 1.4 GB, so installing takes a few minutes over the network. `xcrun devicectl list devices` shows your Apple TV's name. You can also open `build/tvos/FrontlineRewritten.xcodeproj` and run the **FrontlineTV** scheme on the Apple TV from Xcode.
+
+**Playing:**
+- Open **Frontline Rewritten** from the Apple TV's Home screen. The setup screen offers the same choices as the Mac's, plus **Picture size**, for TVs that cut off the edges.
+- **Controls → Controller buttons** rebinds your controller's buttons (melee, reload and more on the stick clicks or Options), or swaps or inverts the sticks.
+- Each controller plays on a port of its own, so two to four players can play the original split screen.
+- Saves and controller bindings are kept in your **iCloud account**, so sign the Apple TV in to iCloud (Settings → Users and Accounts). They come back after a reinstall and follow you to another Apple TV.
+- Leaving the app pauses the game.
+
+**Updating, and expiry:** an app installed this way stops opening when its development profile expires, after up to a year. Build and install again to renew it, or to update it after pulling changes. Your saves come back from iCloud.
+
+**Troubleshooting:**
+- **A provisioning error when building:** the App ID needs iCloud with CloudKit, and the container `iCloud.<bundle ID>` assigned to it. `FRONTLINE_TV_BUNDLE_ID` has to match the App ID exactly.
+- **The Apple TV isn't found:** wake it up, and check that it's paired in Xcode's Devices window.
+- **The app quits right away:** run it with its console to see why:
+  ```sh
+  xcrun devicectl device process launch --console --device "<Apple TV name>" <bundle ID>
+  ```
+- **Crash reports from the Apple TV:**
+  ```sh
+  xcrun devicectl device info files --device "<Apple TV name>" --domain-type systemCrashLogs
+  ```
+
+**Personal use only.** The app contains your copy of the game. Install it only on your own Apple TV, straight from your Mac: don't share the app, and don't upload it to App Store Connect or TestFlight.
+
+**Simulator:** the `tvos-sim` preset builds for the Apple TV simulator without signing. It leaves the disc out, and an unsigned build keeps its saves locally:
+
+```sh
+cmake --preset tvos-sim
+cmake --build --preset tvos-sim -- -sdk appletvsimulator
+xcrun simctl install booted build/tvos-sim/apps/ios/Debug-appletvsimulator/FrontlineTV.app
+SIMCTL_CHILD_FRONTLINE_DISC="$PWD/FrontlineDecompiled/orig/GMFE69/disc" xcrun simctl launch --console-pty booted <bundle ID>
+```
+
+The port's notes and checklists are in [docs/port/phase3-status.md](docs/port/phase3-status.md).
+
 ## Editing the game code
 
 The game code lives only in the `FrontlineDecompiled` submodule, and the GameCube build has to keep working. The full rules are in [0004](docs/architecture/0004-compiler-rules.md). In short:
@@ -150,6 +219,8 @@ The game code lives only in the `FrontlineDecompiled` submodule, and the GameCub
 | `game/` | CMake target that compiles the decomp's Game, Movie, EA System and EA Sound units with clang |
 | `platform/` | The GameCube system libraries, natively: OS, DVD, VI, PAD, CARD, audio, GX |
 | `apps/macos/` | SwiftUI + Metal app shell |
+| `apps/ios/` | The tvOS app: UIKit scene, SwiftUI setup screen, game controllers |
+| `apps/shared/` | What both apps share: the bridge to the game, settings, the display thread, controllers |
 | `apps/headless/` | The game without a window, for smoke tests |
 | `tests/` | `datacheck` (file formats on your disc), `ostest` (the OS layer), `aitest`, `hfrtest`, `limitertest` |
 | `tools/` | `gen_sources.py` (unit list from the decomp), `build_report.py` (error work list) |
@@ -158,4 +229,4 @@ The game code lives only in the `FrontlineDecompiled` submodule, and the GameCub
 
 ## Legal
 
-Medal of Honor: Frontline is © Electronic Arts. This project isn't affiliated with or endorsed by Electronic Arts or Nintendo. It's distributed as source only; build it with your own copy of the game.
+Medal of Honor: Frontline is © Electronic Arts. This project isn't affiliated with or endorsed by Electronic Arts or Nintendo. It's distributed as source only; build it with your own copy of the game. The tvOS app has your disc inside it, so keep it on your own devices: don't share it or upload it anywhere, App Store Connect and TestFlight included.

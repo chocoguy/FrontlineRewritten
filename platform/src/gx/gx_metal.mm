@@ -16,6 +16,11 @@
 // and the display draws them, as often as the screen refreshes.
 
 #import <Metal/Metal.h>
+#include <TargetConditionals.h>
+#include <mach/mach.h>
+#if !TARGET_OS_OSX
+#include <os/proc.h>
+#endif
 #include <os/lock.h>
 #include <time.h>
 
@@ -190,7 +195,9 @@ bool g_hfrTrace;
 // FRONTLINE_PERF=1: a line a second on stderr saying where the frames' time
 // went. A frame ends at GXDrawDone (CScreen::Flip's, in the game loop). The
 // CPU's share is what's left of the frame after waiting for the GPU and for
-// the retrace (SPIN_WAIT in CScreen::Wait).
+// the retrace (SPIN_WAIT in CScreen::Wait). A second line gives the app's
+// memory (and, on tvOS, how much more the system lets it have), and the
+// shader libraries say how long they took to compile.
 struct Perf {
     bool on;
     uint64_t secondStart, lastFrame, spinStart;
@@ -249,6 +256,18 @@ void PerfFrame(uint64_t start, uint64_t waited) {
                  g_compiling, p.coverageDraws / n, p.lists[NATIVE_BIN_WORLD] / n * ms,
                  p.lists[NATIVE_BIN_PROP] / n * ms, p.lists[NATIVE_BIN_CHARACTER] / n * ms,
                  p.lists[NATIVE_BIN_VIEWMODEL] / n * ms, p.lists[NATIVE_BIN_NONE] / n * ms);
+    task_vm_info_data_t vm;
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, (task_info_t)&vm, &count) == KERN_SUCCESS) {
+#if TARGET_OS_OSX
+        std::fprintf(stderr, "[perf] memory: footprint %.0f MB (peak %.0f MB)\n", vm.phys_footprint / 1048576.0,
+                     vm.ledger_phys_footprint_peak / 1048576.0);
+#else
+        std::fprintf(stderr, "[perf] memory: footprint %.0f MB (peak %.0f MB), %.0f MB more available\n",
+                     vm.phys_footprint / 1048576.0, vm.ledger_phys_footprint_peak / 1048576.0,
+                     os_proc_available_memory() / 1048576.0);
+#endif
+    }
     const NativeCounts& nc = p.native;
     if (nc.draws + nc.fallbacks[0] + nc.fallbacks[1] + nc.fallbacks[2] != 0) {
         std::fprintf(stderr,
@@ -344,12 +363,16 @@ void InitDevice() {
         g_queue = [g_device newCommandQueue];
         g_libraryCompile = dispatch_group_create();
         dispatch_group_async(g_libraryCompile, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            const uint64_t start = NowNanos();
             NSError* error = nil;
             g_library = [g_device newLibraryWithSource:[NSString stringWithUTF8String:kShaderSource]
                                                options:nil
                                                  error:&error];
             if (g_library == nil) {
                 g_libraryError = error.localizedDescription;
+            }
+            if (std::getenv("FRONTLINE_PERF") != nullptr) {
+                std::fprintf(stderr, "[perf] GX shader library compiled in %.0f ms\n", (NowNanos() - start) * 1e-6);
             }
         });
         g_freeBuffers = [NSMutableArray array];

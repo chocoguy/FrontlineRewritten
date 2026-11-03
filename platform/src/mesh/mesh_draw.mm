@@ -100,6 +100,7 @@ void StartLibrary() {
         g_unorm = [device newBufferWithBytes:unorm length:sizeof(unorm) options:MTLResourceStorageModeShared];
         g_libraryCompile = dispatch_group_create();
         dispatch_group_async(g_libraryCompile, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            const uint64_t start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
             MTLCompileOptions* options = [MTLCompileOptions new];
             options.mathMode = MTLMathModeSafe;  // as GX's vertex stage computes, but for rounding
             NSError* error = nil;
@@ -108,6 +109,10 @@ void StartLibrary() {
                                                error:&error];
             if (g_library == nil) {
                 std::fprintf(stderr, "frontline: mesh shader: %s\n", error.localizedDescription.UTF8String);
+            }
+            if (std::getenv("FRONTLINE_PERF") != nullptr) {
+                std::fprintf(stderr, "[perf] mesh shader library compiled in %.0f ms\n",
+                             (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) * 1e-6);
             }
             g_libraryDone.store(true, std::memory_order_release);
         });

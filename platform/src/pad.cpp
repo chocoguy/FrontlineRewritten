@@ -7,6 +7,7 @@
 // The keyboard and mouse reach the game as game actions (native/hooks.h), not
 // as controller buttons: the app sets what's held and how far the mouse moved
 // (SetKeyboardMouse), and CInputManager takes it once a frame (NativeTakeInput).
+// Controller buttons bound to game actions (SetPadActions) arrive the same way.
 // Whichever of them or a controller was used last picks what the on-screen
 // controls show (NativePromptDevice), with the keys' names from the app
 // (SetKeyLabel).
@@ -52,6 +53,8 @@ PADSamplingCallback g_samplingCallback;
 
 // The keyboard and mouse, as the app left them since the game's last take.
 NativeInput g_keyboardMouse[4];
+// The game actions held on controller buttons (SetPadActions), added to them.
+uint32_t g_padActions[4];
 bool g_playing;
 
 // The device the on-screen controls show, and how often it changed.
@@ -354,6 +357,16 @@ void frontline::PressAction(int port, uint32_t action) {
     pthread_mutex_unlock(&g_lock);
 }
 
+void frontline::SetPadActions(int port, uint32_t held) {
+    pthread_mutex_lock(&g_lock);
+    g_keyboardMouse[port].pressed |= held & ~g_padActions[port];
+    g_padActions[port] = held;
+    pthread_mutex_unlock(&g_lock);
+    if (held != 0) {
+        UsedDevice(NATIVE_DEVICE_CONTROLLER);
+    }
+}
+
 void frontline::AddMouseLook(int port, float lookRight, float lookUp) {
     pthread_mutex_lock(&g_lock);
     g_keyboardMouse[port].lookRight += lookRight;
@@ -396,6 +409,7 @@ bool frontline::IsPlaying() { return __atomic_load_n(&g_playing, __ATOMIC_RELAXE
 extern "C" void NativeTakeInput(int port, int playing, NativeInput* input) {
     pthread_mutex_lock(&g_lock);
     *input = g_keyboardMouse[port];
+    input->held |= g_padActions[port];
     g_keyboardMouse[port].pressed = 0;
     g_keyboardMouse[port].lookRight = 0;
     g_keyboardMouse[port].lookUp = 0;

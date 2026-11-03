@@ -17,4 +17,9 @@ id<MTLDevice> MetalDevice();
 // the display's refresh rate.
 void Present(id<CAMetalDrawable> drawable, double time);
 
+// How much of the drawable the picture fits in, centered: 1 (all of it, the
+// default) down to 0.5. For TVs that crop the picture's edges (overscan). It
+// can change at any time.
+void SetPictureSize(float share);
+
 }  // namespace frontline

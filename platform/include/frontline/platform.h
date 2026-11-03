@@ -70,6 +70,12 @@ void StartOffscreenDisplay(double rate);
 // starts. FRONTLINE_CARD_A and FRONTLINE_CARD_B override it.
 void SetCardFolder(int slot, const char* folder);
 
+// Called after each change to a memory card's files: the .gci at `path` was
+// written in full, or `removed`. It runs on the game's thread, so it must
+// return at once (the tvOS app hands the change to its iCloud sync).
+using CardChangeCallback = void (*)(const char* path, bool removed);
+void SetCardChangeCallback(CardChangeCallback callback);
+
 // The way to play and its picture, for the whole run (set before the game
 // starts; FRONTLINE_MODE=classic|rewritten, FRONTLINE_RESOLUTION=<lines>,
 // FRONTLINE_WIDESCREEN=<w>:<h>, FRONTLINE_HFR=0|1, FRONTLINE_MSAA=<samples>
@@ -143,6 +149,10 @@ void AddMouseLook(int port, float lookRight, float lookUp);
 // One press of `action` at the game's next take, as if a key bound to it was
 // tapped (the app pauses the game this way when it goes to the background).
 void PressAction(int port, uint32_t action);
+// Game actions a controller's buttons are bound to (the app's controller
+// bindings), held now. They add to the keyboard's, but count as the
+// controller being used, so the on-screen controls stay the controller's.
+void SetPadActions(int port, uint32_t held);
 
 // What the keys bound to an action are called (NATIVE_LABEL_* in
 // native/hooks.h), for the on-screen controls. Set before the game starts.

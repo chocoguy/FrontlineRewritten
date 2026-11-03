@@ -39,6 +39,10 @@ set_target_properties(frontline_game PROPERTIES
     PREFIX ""
     SUFFIX ".so"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/game")
+if(FRONTLINE_TVOS)
+    # The app signs it with its own identity when it embeds it.
+    set_target_properties(frontline_game PROPERTIES XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
+endif()
 
 # Native-only game code of this repo's own (game/native/), built like the
 # decomp's: the hooks it implements are declared in the shared headers.

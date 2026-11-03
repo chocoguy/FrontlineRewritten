@@ -1,11 +1,10 @@
 import AppKit
 import QuartzCore
-import os
 
 /// Drives the game's view at the screen's refresh rate, up to 120 Hz. On the
 /// main thread, each refresh hands the game the controller's and the keyboard
-/// and mouse's state; a display thread of its own shows the game's latest
-/// frame.
+/// and mouse's state; a display thread of its own (`Presenter`) shows the
+/// game's latest frame.
 ///
 /// The game keeps its own 59.94 Hz clock (ROADMAP gotcha 5): a faster screen
 /// only shows each frame sooner, or, with Rewritten's high frame rate, draws
@@ -16,6 +15,7 @@ final class Renderer: NSObject {
     static let maxRate = 120
 
     let input = Input()
+    private let controllers = Controllers()
     private weak var view: GameSurfaceView?
     private var inputLink: CADisplayLink?
     private var presenter: Presenter?
@@ -46,50 +46,8 @@ final class Renderer: NSObject {
             view.updateCapture(playing: FrontlineIsPlaying())
             input.sendKeyboardMouse(focused: view.focused)
         }
-        FrontlineSetPad(0, input.read())
+        controllers.update()
         // Rewritten's field of view follows the Settings window as it changes.
-        FrontlineSetFieldOfView(Float(Settings.fieldOfView(.standard)))
-        FrontlineSetFullAutoSpringfield(UserDefaults.standard.bool(forKey: Settings.fullAutoSpringfield))
-        input.rumble(FrontlineRumble(0))
-    }
-}
-
-/// The display thread: a CAMetalDisplayLink on a run loop of its own, which
-/// presents the game's picture for each refresh, timed for when it will be
-/// on screen.
-final class Presenter: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendable {
-    private let link: CAMetalDisplayLink
-    /// A refresh rate range set from the main thread, for the display thread to apply.
-    private let pendingRange = OSAllocatedUnfairLock<CAFrameRateRange?>(initialState: nil)
-
-    init(layer: CAMetalLayer) {
-        link = CAMetalDisplayLink(metalLayer: layer)
-        super.init()
-        link.delegate = self
-        // Draw a refresh ahead, not two: the frame is little work, and at 2 the
-        // 59.94 Hz frames land unevenly on a 60 Hz screen (some shown twice,
-        // some never). FRONTLINE_FRAME_LATENCY=<refreshes> tries others.
-        link.preferredFrameLatency = Float(ProcessInfo.processInfo.environment["FRONTLINE_FRAME_LATENCY"] ?? "") ?? 1
-        let thread = Thread { [self] in
-            link.add(to: .current, forMode: .default)
-            RunLoop.current.run()
-        }
-        thread.name = "frontline display"
-        thread.qualityOfService = .userInteractive
-        thread.start()
-    }
-
-    func setRange(_ range: CAFrameRateRange) {
-        pendingRange.withLock { $0 = range }
-    }
-
-    func metalDisplayLink(_ link: CAMetalDisplayLink, needsUpdate update: CAMetalDisplayLink.Update) {
-        if let range = pendingRange.withLock({ (pending: inout CAFrameRateRange?) -> CAFrameRateRange? in
-            defer { pending = nil }
-            return pending
-        }) {
-            link.preferredFrameRateRange = range
-        }
-        FrontlinePresent(update.drawable, update.targetPresentationTimestamp)
+        Settings.applyLive(.standard)
     }
 }

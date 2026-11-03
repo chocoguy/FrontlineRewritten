@@ -78,6 +78,8 @@ fragment float4 display_yuv(Out in [[stage_in]], texture2d<float> frame [[textur
 )msl";
 
 id<MTLRenderPipelineState> g_rgb, g_yuv;
+// SetPictureSize's share of the drawable the picture fits in.
+std::atomic<float> g_pictureSize{1};
 MTLPixelFormat g_format = MTLPixelFormatInvalid;
 id<MTLTexture> g_yuvFrames[3];  // a ring, so the CPU never writes one the GPU is reading
 uint32_t g_yuvNext;
@@ -148,8 +150,10 @@ void Encode(id<MTLCommandBuffer> commands, id<MTLTexture> target, const frontlin
         }
         // The screen (4:3, or wider for a widescreen level: the frame's width
         // on the 480-line screen, at whatever resolution it was rendered),
-        // and the frame's lines on its 480.
-        double w = target.width, h = target.height;
+        // and the frame's lines on its 480. It fits in the picture size's
+        // share of the target, centered.
+        double size = g_pictureSize.load(std::memory_order_relaxed);
+        double w = target.width * size, h = target.height * size;
         double screenW = std::min(w, h * 4 / 3), screenH = screenW * 3 / 4;
         uint64_t wide = yuv ? 0 : (uint64_t)texture.width * frame.height, tall = (uint64_t)texture.height * 480;
         if (wide * 3 > tall * 4) {
@@ -161,7 +165,8 @@ void Encode(id<MTLCommandBuffer> commands, id<MTLTexture> target, const frontlin
         if (!yuv) {
             frontline::gx::SetDisplayShrinks(screenW < texture.width || frameH < texture.height);
         }
-        [encoder setViewport:(MTLViewport){(w - screenW) / 2, (h - frameH) / 2, screenW, frameH, 0, 1}];
+        [encoder setViewport:(MTLViewport){(target.width - screenW) / 2, (target.height - frameH) / 2, screenW, frameH,
+                                           0, 1}];
         [encoder setRenderPipelineState:yuv ? g_yuv : g_rgb];
         [encoder setFragmentTexture:texture atIndex:0];
         [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
@@ -501,6 +506,8 @@ void Show(id<MTLTexture> target, id<CAMetalDrawable> drawable, double time) {
 }  // namespace
 
 id<MTLDevice> frontline::MetalDevice() { return gx::Device(); }
+
+void frontline::SetPictureSize(float share) { g_pictureSize.store(std::clamp(share, 0.5f, 1.0f)); }
 
 void frontline::Present(id<CAMetalDrawable> drawable, double time) {
     if (drawable != nil) {
