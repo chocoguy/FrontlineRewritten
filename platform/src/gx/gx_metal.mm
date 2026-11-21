@@ -23,6 +23,7 @@
 #endif
 #include <os/lock.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
@@ -77,6 +78,15 @@ float g_scale = 1.0f;
 //   and trilinear and anisotropic filtering for linear ones (Sampler).
 uint32_t g_samples = 1;
 bool g_filtering;
+// Rewritten's Texture filtering setting: magnified textures are read
+// bicubically (gx_shader.cpp SampleBicubic). FRONTLINE_TEXTURE_FILTER=
+// bilinear|bicubic sets it; =alternate is bicubic only every other second of
+// FRONTLINE_PERF's, so one scene gives its GPU cost.
+bool g_bicubic, g_bicubicAlternate, g_bicubicSkipped;
+bool g_plainTextures;  // NativePlainTextures
+// Rewritten's Ambient occlusion setting and its tuning (OccludeScene).
+bool g_ao, g_aoShow, g_aoAlternate, g_aoSkipped;
+float g_aoRadius = 0.9f, g_aoStrength = 0.8f, g_aoReach = 60.0f;
 
 id<MTLDevice> g_device;
 id<MTLCommandQueue> g_queue;
@@ -85,12 +95,30 @@ id<MTLTexture> g_efbColor;  // (none when frames are only recorded: the display 
 id<MTLTexture> g_efbDepth;
 id<MTLTexture> g_efbMsaa;   // multisampled color (MSAA only)
 bool g_efbMade;
+
+// The run's settings the EFB and pipelines were made for (MakeEfb). A game
+// that Exit Game stopped may start again with others (ForgetGxRunSettings).
+struct RunSettings {
+    int width;
+    float scale;
+    int samples;
+    int mode;
+    bool hfr, modern, fastSmoke, bicubic, ao;
+
+    bool operator==(const RunSettings&) const = default;
+};
+RunSettings g_madeFor;
+
+RunSettings CurrentRunSettings() {
+    return {NativeRenderWidth(), RenderScale(), MsaaSamples(), NativeGameMode(),
+            HighFrameRate(), NativeModernRender() != 0, FastSmoke(), BicubicTextures(), AmbientOcclusion()};
+}
 uint32_t g_efbPixels[2];  // the EFB's size in its textures' pixels
 // The ubershader's functions (no function constants), and its pipelines by
 // blend key. Pipeline and sampler states by the keys DepthState and Sampler
 // make.
 id<MTLFunction> g_uberVertex, g_uberFragment;
-id<MTLRenderPipelineState> g_pipelines[1 << 10];
+id<MTLRenderPipelineState> g_pipelines[1 << 11];
 id<MTLDepthStencilState> g_depthStates[1 << 5];
 id<MTLSamplerState> g_samplers[1 << 13];
 NSMutableArray<id<MTLBuffer>>* g_freeBuffers;
@@ -208,7 +236,48 @@ struct Perf {
     NativeCounts native;               // the Modern renderer's (EfbNativeCounts)
     std::atomic<uint64_t> gpu;  // GPU time of the finished command buffers
     double gpuLastEnd;          // (completion handlers only)
+    // The particle systems' scope (NativeParticles): its draws, its CPU time
+    // from its start to its end, and the samples its draws passed the depth
+    // test with (blended), counted by the GPU.
+    uint64_t particleDraws, particleQuads, particleNanos, particleStart;
+    std::atomic<uint64_t> particleSamples;
+    // Rewritten's: the draws they were merged into, the frames that went to
+    // the particle buffer, and the screens they were reckoned to cover.
+    uint64_t particleBatches, particleBuffered, particleStops;  // (stops: resolved where the pass stops anyway)
+    double particleScreens;
 } g_perf;
+
+// Rewritten's particles (further down): whether the scope's draws are
+// collected, and the EFB's pixels along a side of a particle buffer pixel
+// (0 or 1: no buffer).
+bool g_particleBatching;
+uint32_t g_particleDivisor;
+
+// Inside the particle systems' scope (NativeParticles).
+bool g_particles;
+// FRONTLINE_PARTICLES, for measuring and comparing (Rewritten's particles,
+// below, say what the last four mean):
+// - off: particles aren't drawn.
+// - alternate: drawn only every other second of FRONTLINE_PERF's, so one
+//   scene gives their GPU cost.
+// - direct: drawn draw by draw as the game sends them, as in Classic.
+// - full: collected, and always drawn into the EFB.
+// - buffer: collected, and always drawn into the particle buffer.
+// - compare: collected; the buffer and the EFB on alternate seconds.
+enum { kParticlesAuto, kParticlesOff, kParticlesAlternate, kParticlesDirect, kParticlesFull, kParticlesBuffer,
+       kParticlesCompare };
+int g_particleMode;
+bool g_particlesSkipped;
+bool g_particleCompareBuffer;  // compare: this second's go to the buffer
+// FRONTLINE_PERF: the GPU's count of the samples the particles' draws pass,
+// eight bytes a scope in the command buffer's g_visibility. A scope drawn
+// into the particle buffer counts its pixels, each worth g_visibilityScale
+// of the EFB's samples.
+constexpr uint32_t kVisibilitySlots = 32;
+id<MTLBuffer> g_visibility;
+uint32_t g_visibilityUsed;
+uint32_t g_visibilityScale[kVisibilitySlots];
+bool g_visibilityOn;
 
 // A finished command buffer's GPU time, less any part spent alongside the
 // one before (frames overlap on the GPU). Completion handlers run in order.
@@ -268,6 +337,29 @@ void PerfFrame(uint64_t start, uint64_t waited) {
                      os_proc_available_memory() / 1048576.0);
 #endif
     }
+    if (p.particleDraws != 0 || g_particleMode != kParticlesAuto) {
+        const double pixels = (double)g_efbPixels[0] * g_efbPixels[1] * g_samples;
+        std::fprintf(stderr,
+                     "[perf] particles%s: %.0f draws, %.0f quads, cpu %.2f ms | blended %.2f screens (%.1f Mpx) | "
+                     "collected: %.0f draws, reckoned %.2f screens, %.0f%% of frames in the buffer (1/%u), %.0f%% at a pass stop\n",
+                     g_particlesSkipped ? " (not drawn)" : "", p.particleDraws / n, p.particleQuads / n,
+                     p.particleNanos / n * ms, p.particleSamples.load() / n / pixels,
+                     p.particleSamples.load() / n / g_samples * 1e-6, p.particleBatches / n, p.particleScreens / n,
+                     p.particleBuffered * 100.0 / n, g_particleDivisor, p.particleStops * 100.0 / n);
+    }
+    p.particleDraws = p.particleQuads = p.particleNanos = p.particleBatches = p.particleBuffered = p.particleStops = 0;
+    p.particleScreens = 0;
+    p.particleSamples.store(0);
+    if (g_particleMode == kParticlesAlternate) {
+        g_particlesSkipped = !g_particlesSkipped;
+    }
+    if (g_bicubicAlternate) {
+        g_bicubicSkipped = !g_bicubicSkipped;
+    }
+    if (g_aoAlternate) {
+        g_aoSkipped = !g_aoSkipped;
+    }
+    g_particleCompareBuffer = !g_particleCompareBuffer;
     const NativeCounts& nc = p.native;
     if (nc.draws + nc.fallbacks[0] + nc.fallbacks[1] + nc.fallbacks[2] != 0) {
         std::fprintf(stderr,
@@ -377,6 +469,15 @@ void InitDevice() {
         });
         g_freeBuffers = [NSMutableArray array];
         g_perf.on = std::getenv("FRONTLINE_PERF") != nullptr;
+        if (const char* particles = std::getenv("FRONTLINE_PARTICLES")) {
+            static const char* const kNames[] = {"auto", "off", "alternate", "direct", "full", "buffer", "compare"};
+            for (int i = 0; i < 7; i++) {
+                if (std::strcmp(particles, kNames[i]) == 0) {
+                    g_particleMode = i;
+                }
+            }
+            g_particlesSkipped = g_particleMode == kParticlesOff;
+        }
         g_hash = std::getenv("FRONTLINE_GX_HASH") != nullptr;
         g_snap = std::getenv("FRONTLINE_GX_SNAP") != nullptr;
         g_hfrVerify = std::getenv("FRONTLINE_HFR_VERIFY") != nullptr;
@@ -384,6 +485,22 @@ void InitDevice() {
         g_texCheck = std::getenv("FRONTLINE_GX_TEXCHECK") != nullptr;
         g_sync = std::getenv("FRONTLINE_GX_SYNC") != nullptr;
         g_originalFiltering = std::getenv("FRONTLINE_GX_ORIGINAL_FILTERING") != nullptr;
+        if (const char* filter = std::getenv("FRONTLINE_TEXTURE_FILTER")) {
+            g_bicubicAlternate = std::strcmp(filter, "alternate") == 0;
+        }
+        if (const char* ao = std::getenv("FRONTLINE_AO")) {
+            g_aoAlternate = std::strcmp(ao, "alternate") == 0;
+            g_aoShow = std::strcmp(ao, "show") == 0;
+        }
+        if (const char* radius = std::getenv("FRONTLINE_AO_RADIUS")) {
+            g_aoRadius = (float)std::atof(radius);
+        }
+        if (const char* strength = std::getenv("FRONTLINE_AO_STRENGTH")) {
+            g_aoStrength = (float)std::atof(strength);
+        }
+        if (const char* reach = std::getenv("FRONTLINE_AO_REACH")) {
+            g_aoReach = (float)std::atof(reach);
+        }
         g_uber = std::getenv("FRONTLINE_GX_UBER") != nullptr;
         g_verify = !g_uber && std::getenv("FRONTLINE_GX_VERIFY") != nullptr;
         g_nativeVerify = !g_verify && std::getenv("FRONTLINE_NATIVE_VERIFY") != nullptr;
@@ -426,6 +543,7 @@ void MakeEfb() {
         return;
     }
     g_efbMade = true;
+    g_madeFor = CurrentRunSettings();
     g_efbWidth = (uint32_t)NativeRenderWidth();
     g_scale = RenderScale();
     g_efbPixels[0] = (uint32_t)std::lround(g_efbWidth * g_scale);
@@ -436,6 +554,8 @@ void MakeEfb() {
         g_samples = 1;
     }
     g_filtering = NativeGameMode() == NATIVE_MODE_REWRITTEN && !g_originalFiltering;
+    g_bicubic = BicubicTextures() && !g_originalFiltering;
+    g_ao = frontline::AmbientOcclusion();
     g_nativeVerify = g_nativeVerify && NativeModernRender() != 0;
     g_recordOnly = g_hfr && !g_verify && !g_hash && !g_snap && !g_hfrVerify;
     if (g_recordOnly) {
@@ -460,8 +580,21 @@ void MakeEfb() {
             g_shadowMsaa = [g_device newTextureWithDescriptor:desc];
         }
     }
+    // Rewritten's particles are collected, and the heavy ones go to a buffer
+    // two thirds of the way from the EFB's size to the console's: 594 lines
+    // at 1080p, 792 at 1440p and 4K, and none at 720p. (At a quarter of 4K,
+    // spray's droplets were plainly blurred.)
+    g_particleBatching = NativeGameMode() == NATIVE_MODE_REWRITTEN && !g_hfr && !Shadowed() &&
+                         g_particleMode != kParticlesDirect;
+    if (g_particleBatching && FastSmoke()) {
+        const char* divisor = std::getenv("FRONTLINE_PARTICLE_DIVISOR");
+        g_particleDivisor = divisor != nullptr ? (uint32_t)std::atoi(divisor) : (uint32_t)std::lround(g_scale / 1.5f);
+        g_particleDivisor = std::clamp(g_particleDivisor, 1u, 4u);
+    }
     desc.pixelFormat = MTLPixelFormatDepth32Float;
-    desc.usage = MTLTextureUsageRenderTarget;
+    // (The particle buffer's depth is read from the EFB's.)
+    desc.usage = g_particleDivisor > 1 ? MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead
+                                       : MTLTextureUsageRenderTarget;
     g_efbDepth = [g_device newTextureWithDescriptor:desc];
     if (Shadowed()) {
         g_shadowDepth = [g_device newTextureWithDescriptor:desc];
@@ -509,6 +642,12 @@ FrameRecord* Recording() {
     return g_record;
 }
 
+void AoComposite();
+bool g_aoCompositePending;  // the occlusion is to go over the EFB when its pass resumes
+void ParticleComposite();
+bool g_particleCompositePending;  // the particle buffer is to go over the EFB when its pass resumes
+bool g_particlesHeld;             // collected particle draws wait for ParticleResolve
+
 void BeginPass() {
     if (g_encoder != nil || (g_recordOnly && g_passOpen)) {
         return;
@@ -553,6 +692,13 @@ void BeginPass() {
         pass.depthAttachment.loadAction = MTLLoadActionLoad;
     }
     g_clearColorPending = g_clearDepthPending = false;
+    if (g_perf.on) {
+        if (g_visibility == nil) {
+            g_visibility = [g_device newBufferWithLength:kVisibilitySlots * 8 options:MTLResourceStorageModeShared];
+            g_visibilityUsed = 0;
+        }
+        pass.visibilityResultBuffer = g_visibility;
+    }
     g_encoder = [g_commands renderCommandEncoderWithDescriptor:pass];
     [g_encoder setFrontFacingWinding:MTLWindingClockwise];
     g_passCount++;
@@ -572,6 +718,12 @@ void BeginPass() {
         g_shadowEncoder = [g_shadowCommands renderCommandEncoderWithDescriptor:shadow];
         [g_shadowEncoder setFrontFacingWinding:MTLWindingClockwise];
     }
+    if (g_aoCompositePending) {
+        AoComposite();
+    }
+    if (g_particleCompositePending) {
+        ParticleComposite();
+    }
     ResetBound();
 }
 
@@ -580,6 +732,7 @@ void BeginPass() {
 // the copy; only MSAA's samples can go.)
 void EndPass(bool depthUnused = false, bool colorUnused = false) {
     g_passOpen = false;
+    g_visibilityOn = false;
     const MTLStoreAction depth = depthUnused ? MTLStoreActionDontCare : MTLStoreActionStore;
     const MTLStoreAction color =
         colorUnused ? MTLStoreActionMultisampleResolve : MTLStoreActionStoreAndMultisampleResolve;
@@ -601,7 +754,15 @@ void EndPass(bool depthUnused = false, bool colorUnused = false) {
     }
 }
 
+void ParticleResolve(bool passStops);
+
 void Commit() {
+    if (g_particlesHeld) {
+        ParticleResolve(false);
+    }
+    if (g_particleCompositePending) {
+        BeginPass();
+    }
     EndPass();
     if (g_commands == nil) {
         return;
@@ -619,12 +780,23 @@ void Commit() {
     }
     NSArray<id<MTLBuffer>>* used = g_frameBuffers;
     const bool perf = g_perf.on;
+    id<MTLBuffer> visibility = g_visibility;
+    const uint32_t scopes = g_visibilityUsed;
+    struct {
+        uint32_t of[kVisibilitySlots];
+    } scale;
+    std::memcpy(scale.of, g_visibilityScale, sizeof(scale.of));
+    g_visibility = nil;
     [g_commands addCompletedHandler:^(id<MTLCommandBuffer> done) {
         os_unfair_lock_lock(&g_bufferLock);
         [g_freeBuffers addObjectsFromArray:used];
         os_unfair_lock_unlock(&g_bufferLock);
         if (perf) {
             PerfGpu(done.GPUStartTime, done.GPUEndTime);
+            const uint64_t* passed = static_cast<const uint64_t*>(visibility.contents);
+            for (uint32_t i = 0; i < scopes; i++) {
+                g_perf.particleSamples.fetch_add(passed[i] * scale.of[i], std::memory_order_relaxed);
+            }
         }
     }];
     [g_commands commit];
@@ -722,11 +894,38 @@ uint32_t BlendKey() {
            (AlphaCoverage() ? 1u : 0u) << 9;
 }
 
+// A blend key's bit for a pipeline that draws into the particle buffer
+// (Rewritten's particles, below) instead of the EFB.
+constexpr uint32_t kBufferBlend = 1u << 10;
+
 // A pipeline for blend key `key`, without its functions.
 MTLRenderPipelineDescriptor* Descriptor(uint32_t key) {
     const uint32_t type = key & 3, src = (key >> 2) & 7, dst = (key >> 5) & 7;
     const bool colorUpdate = (key >> 8) & 1;
     MTLRenderPipelineDescriptor* desc = [MTLRenderPipelineDescriptor new];
+    if ((key & kBufferBlend) != 0) {
+        // The buffer's color is what the particles add to what's behind them
+        // and its alpha how much of that still shows, so blending colors as
+        // GX does while scaling the alpha by what a draw lets through gives,
+        // laid over the EFB, what blending into the EFB would (ParticleBlend
+        // says which blends).
+        auto* att = desc.colorAttachments[0];
+        att.pixelFormat = MTLPixelFormatRGBA16Float;
+        desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+        att.writeMask = colorUpdate ? MTLColorWriteMaskAll : MTLColorWriteMaskNone;
+        att.blendingEnabled = YES;
+        att.sourceAlphaBlendFactor = MTLBlendFactorZero;
+        if (type == 3) {  // dst - src
+            att.sourceRGBBlendFactor = att.destinationRGBBlendFactor = MTLBlendFactorOne;
+            att.rgbBlendOperation = MTLBlendOperationReverseSubtract;
+            att.destinationAlphaBlendFactor = MTLBlendFactorOne;
+        } else {
+            att.sourceRGBBlendFactor = SrcFactor(src);
+            att.destinationRGBBlendFactor = DstFactor(dst);
+            att.destinationAlphaBlendFactor = dst == 1 ? MTLBlendFactorOne : MTLBlendFactorOneMinusSourceAlpha;
+        }
+        return desc;
+    }
     desc.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     desc.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
     desc.rasterSampleCount = g_samples;
@@ -750,9 +949,8 @@ MTLRenderPipelineDescriptor* Descriptor(uint32_t key) {
     return desc;
 }
 
-// The ubershader's pipeline for the blend state.
-id<MTLRenderPipelineState> Pipeline() {
-    const uint32_t key = BlendKey();
+// The ubershader's pipeline for a blend key (the blend state's).
+id<MTLRenderPipelineState> Pipeline(uint32_t key) {
     id<MTLRenderPipelineState> pipeline = g_pipelines[key];
     if (pipeline != nil) {
         return pipeline;
@@ -769,6 +967,7 @@ id<MTLRenderPipelineState> Pipeline() {
     g_pipelines[key] = pipeline;
     return pipeline;
 }
+id<MTLRenderPipelineState> Pipeline() { return Pipeline(BlendKey()); }
 
 // A TEV setup's shape, which a specialized pipeline is compiled for: the
 // function constants gx_shader.cpp reads, and the blend state. Constant
@@ -776,7 +975,7 @@ id<MTLRenderPipelineState> Pipeline() {
 // uniforms, so setups that differ only in those share a pipeline.
 struct Shape {
     uint32_t blend;
-    uint32_t numStages, numIndStages, numTexGens, alphaFuncs, fogType, texValid, indOrder, indScale;
+    uint32_t numStages, numIndStages, numTexGens, alphaFuncs, fogType, texValid, indOrder, indScale, texBicubic;
     uint32_t vertex;  // 0: GX's vertex stage (tev_vertex); else a native one (EfbVertexFunctions), | kLitFragment
     uint32_t stages[16][7];
 };
@@ -804,6 +1003,7 @@ void MakeShape(const FragUniforms& u, uint32_t numTexGens, Shape& shape) {
     shape.alphaFuncs = (u.alphaComp[0] & 15) | (u.alphaComp[2] & 15) << 4 | (u.alphaComp[3] & 15) << 8;
     shape.fogType = (u.fogType & 7) >= 2 ? u.fogType & 7 : 0;
     shape.texValid = u.texValid;
+    shape.texBicubic = u.texBicubic;
 }
 
 // A hash of the shape. The stages come last, and unused ones are zero.
@@ -865,10 +1065,10 @@ void TakeFinished() {
 
 void CompileSpecialized(const Shape& shape, uint64_t key) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
-    const uint32_t scalars[9] = {shape.numStages, shape.numIndStages, shape.numTexGens,
-                                 shape.alphaFuncs, shape.fogType,      shape.texValid,
-                                 shape.indOrder,   shape.indScale,     (shape.blend >> 9) & 1};
-    [values setConstantValues:scalars type:MTLDataTypeUInt withRange:NSMakeRange(1, 9)];
+    const uint32_t scalars[10] = {shape.numStages, shape.numIndStages, shape.numTexGens,          shape.alphaFuncs,
+                                  shape.fogType,   shape.texValid,     shape.indOrder,            shape.indScale,
+                                  (shape.blend >> 9) & 1,              shape.texBicubic};
+    [values setConstantValues:scalars type:MTLDataTypeUInt withRange:NSMakeRange(1, 10)];
     for (uint32_t i = 0; i < 16; i++) {
         [values setConstantValues:shape.stages[i] type:MTLDataTypeUInt withRange:NSMakeRange(16 + i * 8, 7)];
     }
@@ -1188,6 +1388,14 @@ void FillFragUniforms(FragUniforms& u, id<MTLTexture> __strong* textures, id<MTL
         u.texSize[m][1] = s.texMap[m].height;
         textures[m] = texture;
         samplers[m] = Sampler(s.texMap[m], levels > 1);
+        // Colors the sampler would filter, not the movies' planes (yet).
+        if (g_bicubic && !g_bicubicSkipped && !g_plainTextures && s.texMap[m].magFilter != 0 && !s.texMap[m].linear) {
+            u.texBicubic |= 1u << m;
+        }
+    }
+    // An indirect stage's texels are offsets, not colors.
+    for (uint32_t i = 0; i < s.numIndStages && i < 4; i++) {
+        u.texBicubic &= ~(1u << (s.indOrder[i][1] & 7));
     }
 
     // Texture coordinate sizes (see FragUniforms::coordSize).
@@ -1290,6 +1498,611 @@ void SnapshotCheck() {
     }
 }
 
+// Encodes a draw into the open pass, setting only what changed since the
+// last one (g_bound).
+void EncodeDraw(id<MTLRenderPipelineState> pipeline, id<MTLDepthStencilState> depth, MTLCullMode cull,
+                const MTLViewport& vp, const MTLScissorRect& scissor, const FragUniforms& u,
+                id<MTLTexture> __strong* textures, id<MTLSamplerState> __strong* samplers,
+                const VertexUniforms& vertexUniforms, id<MTLBuffer> vb, NSUInteger vOffset, id<MTLBuffer> ib,
+                NSUInteger iOffset, uint32_t numIndices) {
+    if (g_boundForeign) {
+        ResetBound();
+        g_boundForeign = false;
+    }
+    if (g_bound.pipeline != pipeline) {
+        [g_encoder setRenderPipelineState:pipeline];
+        g_bound.pipeline = pipeline;
+    }
+    if (g_bound.depth != depth) {
+        [g_encoder setDepthStencilState:depth];
+        g_bound.depth = depth;
+    }
+    if (g_bound.cull != cull) {
+        [g_encoder setCullMode:cull];
+        g_bound.cull = cull;
+    }
+    if (!g_bound.viewportSet || std::memcmp(&g_bound.viewport, &vp, sizeof(vp)) != 0) {
+        [g_encoder setViewport:vp];
+        g_bound.viewport = vp;
+        g_bound.viewportSet = true;
+    }
+    for (uint32_t m = 0; m < 8; m++) {
+        if (!(u.texValid & (1u << m))) {
+            continue;
+        }
+        if (g_bound.textures[m] != textures[m]) {
+            [g_encoder setFragmentTexture:textures[m] atIndex:m];
+            g_bound.textures[m] = textures[m];
+        }
+        if (g_bound.samplers[m] != samplers[m]) {
+            [g_encoder setFragmentSamplerState:samplers[m] atIndex:m];
+            g_bound.samplers[m] = samplers[m];
+        }
+    }
+    if (!g_bound.scissorSet || std::memcmp(&g_bound.scissor, &scissor, sizeof(scissor)) != 0) {
+        [g_encoder setScissorRect:scissor];
+        g_bound.scissor = scissor;
+        g_bound.scissorSet = true;
+    }
+    [g_encoder setVertexBuffer:vb offset:vOffset atIndex:0];
+    if (std::memcmp(&g_bound.vertexUniforms, &vertexUniforms, sizeof(vertexUniforms)) != 0) {
+        [g_encoder setVertexBytes:&vertexUniforms length:sizeof(vertexUniforms) atIndex:1];
+        g_bound.vertexUniforms = vertexUniforms;
+    }
+    if (!g_bound.uniformsSet || std::memcmp(&g_bound.uniforms, &u, sizeof(u)) != 0) {
+        [g_encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
+        g_bound.uniforms = u;
+        g_bound.uniformsSet = true;
+    }
+    [g_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                          indexCount:numIndices
+                           indexType:MTLIndexTypeUInt16
+                         indexBuffer:ib
+                   indexBufferOffset:iOffset];
+    g_bindStamp++;
+}
+
+// FRONTLINE_PERF: has the GPU count the samples the particles' draws pass
+// from here on in the open pass, each worth `scale` of the EFB's samples.
+void ParticleCounting(uint32_t scale) {
+    if (g_perf.on && !g_visibilityOn && g_encoder != nil && g_visibilityUsed < kVisibilitySlots) {
+        g_visibilityScale[g_visibilityUsed] = scale;
+        [g_encoder setVisibilityResultMode:MTLVisibilityResultModeCounting offset:8 * g_visibilityUsed++];
+        g_visibilityOn = true;
+    }
+}
+
+// Rewritten's particles.
+//
+// The game keeps no particles: each frame every system draws every emission
+// still alive as its own GXBegin of camera-facing quads, blended and depth
+// tested but never written to depth (CParticleSystem::RenderSystem). That is
+// hundreds of small draws a frame, and smoke or spray near the camera blends
+// the whole screen over many times. At the console's 640 x 448 that was
+// affordable; at 4K with MSAA each layer is some hundred times the samples.
+//
+// So in Rewritten the scope's draws are collected (ParticleAppend), merged
+// while the GX state stays the same, and held until whatever comes next
+// (ParticleResolve):
+// - Into the EFB, as GX would have drawn them, while they cover little.
+// - Into the particle buffer when they cover a lot: 1/g_particleDivisor the
+//   EFB's size each way (MakeEfb) and one sample a pixel, with
+//   the farthest of the EFB's depth under each pixel. The buffer is then laid
+//   over the EFB when its pass resumes (ParticleComposite). Smoke is soft, so
+//   it loses little; a particle's edge against something in front of it is
+//   only as sharp as the buffer.
+// The buffer needs the EFB's pass stopped, which costs a store and a load of
+// the whole EFB. In play the game stops it itself right after the particles,
+// to clear the depth for the weapon in hand (CDMRenderBin::Link's copy): there
+// the buffer costs only keeping the depth, so it's used from fewer screens
+// (kParticleBufferFrom) than when another draw comes first (cutscenes, a
+// bullet's trail).
+struct ParticleBatch {
+    uint32_t pixelGeneration;
+    uint32_t stride, numTexGens;
+    uint32_t firstFloat, numVertices;  // in g_particleVertices
+    uint32_t firstIndex, numIndices;   // in g_particleIndices, from the batch's first vertex
+    MTLCullMode cull;
+    MTLViewport viewport;
+    MTLScissorRect scissor;
+    Shape shape;
+    FragUniforms u;
+    id<MTLTexture> textures[8];
+    id<MTLSamplerState> samplers[8];
+    id<MTLDepthStencilState> depth;
+};
+std::vector<ParticleBatch> g_particleBatches;
+std::vector<float> g_particleVertices;
+std::vector<uint16_t> g_particleIndices;
+// What the collected draws cover: the EFB's pixels summed over the quads
+// (before the depth test), and the rectangle they all lie in.
+double g_particlePixels;
+int32_t g_particleRect[4] = {INT32_MAX, INT32_MAX, INT32_MIN, INT32_MIN};  // x0, y0, x1, y1
+bool g_particleBuffered;  // the last frame's went to the buffer
+// The buffer goes over the EFB from this many screens covered, and stays in
+// use until they cover less than the second (so a scene near the line
+// doesn't flicker between the two).
+constexpr double kParticleBufferFrom[2] = {10.0, 4.0};  // [the pass stops anyway]
+constexpr double kParticleBufferUntil = 0.7;                   // (times the above)
+
+id<MTLTexture> g_particleColor, g_particleDepth;
+id<MTLRenderPipelineState> g_particleDepthPipeline, g_particleOverPipeline, g_particleSubtractPipeline;
+id<MTLDepthStencilState> g_particleDepthFill, g_particleNoDepth;
+MTLScissorRect g_particleCompositeRect;
+bool g_particleCompositeSubtracts;
+
+// The fragment shader's ParticleUniforms (gx_shader.cpp).
+struct ParticleUniforms {
+    uint32_t divisor;
+    uint32_t negative;
+    float size[2];
+};
+ParticleUniforms ParticleBufferUniforms() {
+    return {g_particleDivisor, 0,
+            {(float)(g_particleColor.width * g_particleDivisor), (float)(g_particleColor.height * g_particleDivisor)}};
+}
+
+// Whether the buffer can stand in for the EFB under a blend key: the
+// particles' three (add src * alpha, subtract, and blend by alpha).
+bool ParticleBlend(uint32_t key) {
+    const uint32_t type = key & 3, src = (key >> 2) & 7, dst = (key >> 5) & 7;
+    return type == 3 || (type == 1 && src == 4 && (dst == 1 || dst == 5));
+}
+
+// Adds a triangle's share to what the collected draws cover: its area on the
+// screen once clipped to the near plane, less what the scissor cuts off.
+void ParticleMeasure(const float* a, const float* b, const float* c, const MTLViewport& vp, const MTLScissorRect& sc) {
+    // Clip space, in front of the near plane (z >= 0): up to four corners.
+    const float* in[3] = {a, b, c};
+    double poly[4][2];
+    int n = 0;
+    auto add = [&](double x, double y, double w) {
+        if (w > 1e-6 && n < 4) {
+            poly[n][0] = vp.originX + (x / w * 0.5 + 0.5) * vp.width;
+            poly[n][1] = vp.originY + (0.5 - y / w * 0.5) * vp.height;
+            n++;
+        }
+    };
+    for (int i = 0; i < 3; i++) {
+        const float* p = in[i];
+        const float* q = in[(i + 1) % 3];
+        if (p[2] >= 0) {
+            add(p[0], p[1], p[3]);
+        }
+        if ((p[2] >= 0) != (q[2] >= 0)) {
+            const double t = p[2] / ((double)p[2] - q[2]);
+            add(p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1]), p[3] + t * (q[3] - p[3]));
+        }
+    }
+    if (n < 3) {
+        return;
+    }
+    double twice = 0, bx0 = poly[0][0], by0 = poly[0][1], bx1 = bx0, by1 = by0;
+    for (int i = 0; i < n; i++) {
+        const double* p = poly[i];
+        const double* q = poly[(i + 1) % n];
+        twice += p[0] * q[1] - q[0] * p[1];
+        bx0 = std::min(bx0, p[0]), by0 = std::min(by0, p[1]);
+        bx1 = std::max(bx1, p[0]), by1 = std::max(by1, p[1]);
+    }
+    const double sx0 = sc.x, sy0 = sc.y, sx1 = sc.x + sc.width, sy1 = sc.y + sc.height;
+    const double x0 = std::max(bx0, sx0), y0 = std::max(by0, sy0), x1 = std::min(bx1, sx1), y1 = std::min(by1, sy1);
+    if (!(x1 > x0 && y1 > y0)) {
+        return;
+    }
+    // The share of it inside the scissor, by its bounding box's.
+    const double box = (bx1 - bx0) * (by1 - by0);
+    g_particlePixels += box > 0 ? 0.5 * std::fabs(twice) * ((x1 - x0) * (y1 - y0) / box) : 0;
+    g_particleRect[0] = std::min(g_particleRect[0], (int32_t)std::floor(x0));
+    g_particleRect[1] = std::min(g_particleRect[1], (int32_t)std::floor(y0));
+    g_particleRect[2] = std::max(g_particleRect[2], (int32_t)std::ceil(x1));
+    g_particleRect[3] = std::max(g_particleRect[3], (int32_t)std::ceil(y1));
+}
+
+// Collects a draw of the particles' scope, in the vertex stage's output as
+// SubmitTriangles gets it.
+void ParticleAppend(const float* vertices, uint32_t stride, uint32_t numVertices, const uint16_t* indices,
+                    uint32_t numIndices) {
+    const State& s = g_state;
+    MTLViewport vp;
+    MTLScissorRect scissor;
+    if (!ViewportScissor(vp, scissor) || numVertices > 0xFFFF) {
+        return;
+    }
+    const MTLCullMode cull = s.cullMode == 1 ? MTLCullModeFront : s.cullMode == 2 ? MTLCullModeBack : MTLCullModeNone;
+    ParticleBatch* b = g_particleBatches.empty() ? nullptr : &g_particleBatches.back();
+    if (b == nullptr || b->pixelGeneration != g_pixelGeneration || b->stride != stride || b->cull != cull ||
+        b->numVertices + numVertices > 0xFFFF || std::memcmp(&b->viewport, &vp, sizeof(vp)) != 0 ||
+        std::memcmp(&b->scissor, &scissor, sizeof(scissor)) != 0) {
+        Init();
+        MakeEfb();
+        g_particleBatches.emplace_back();
+        b = &g_particleBatches.back();
+        b->pixelGeneration = g_pixelGeneration;
+        b->stride = stride;
+        b->numTexGens = (stride - kVertexBase) / 3;
+        b->firstFloat = (uint32_t)g_particleVertices.size();
+        b->firstIndex = (uint32_t)g_particleIndices.size();
+        b->numVertices = b->numIndices = 0;
+        b->cull = cull;
+        b->viewport = vp;
+        b->scissor = scissor;
+        FillFragUniforms(b->u, b->textures, b->samplers);
+        MakeShape(b->u, b->numTexGens, b->shape);
+        b->depth = DepthState();
+    }
+    g_particleVertices.insert(g_particleVertices.end(), vertices, vertices + (size_t)numVertices * stride);
+    const size_t at = g_particleIndices.size();
+    g_particleIndices.resize(at + numIndices);
+    for (uint32_t i = 0; i < numIndices; i++) {
+        g_particleIndices[at + i] = (uint16_t)(indices[i] + b->numVertices);
+    }
+    b->numVertices += numVertices;
+    b->numIndices += numIndices;
+    for (uint32_t i = 0; i + 2 < numIndices; i += 3) {
+        ParticleMeasure(vertices + indices[i] * stride, vertices + indices[i + 1] * stride,
+                        vertices + indices[i + 2] * stride, vp, scissor);
+    }
+}
+
+// The particle buffer's textures and pipelines, made the first time it's used.
+void MakeParticleBuffer() {
+    if (g_particleColor != nil) {
+        return;
+    }
+    const uint32_t d = g_particleDivisor;
+    MTLTextureDescriptor* desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
+                                                           width:(g_efbPixels[0] + d - 1) / d
+                                                          height:(g_efbPixels[1] + d - 1) / d
+                                                       mipmapped:NO];
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModePrivate;
+    g_particleColor = [g_device newTextureWithDescriptor:desc];
+    desc.pixelFormat = MTLPixelFormatDepth32Float;
+    desc.usage = MTLTextureUsageRenderTarget;
+    desc.storageMode = MTLStorageModeMemoryless;  // made and used within its pass
+    g_particleDepth = [g_device newTextureWithDescriptor:desc];
+
+    auto pipeline = [](MTLRenderPipelineDescriptor* p, NSString* fragment) {
+        NSError* error = nil;
+        p.vertexFunction = [g_library newFunctionWithName:@"blit_vertex"];
+        p.fragmentFunction = [g_library newFunctionWithName:fragment];
+        id<MTLRenderPipelineState> state = [g_device newRenderPipelineStateWithDescriptor:p error:&error];
+        if (state == nil) {
+            std::fprintf(stderr, "frontline: particle buffer pipeline: %s\n", error.localizedDescription.UTF8String);
+            std::abort();
+        }
+        return state;
+    };
+    MTLRenderPipelineDescriptor* p = [MTLRenderPipelineDescriptor new];
+    p.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA16Float;
+    p.colorAttachments[0].writeMask = MTLColorWriteMaskNone;
+    p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    g_particleDepthPipeline = pipeline(p, g_samples > 1 ? @"particle_depth_ms" : @"particle_depth");
+    // Over the EFB: what the particles add, plus the EFB by what they let through.
+    p = [MTLRenderPipelineDescriptor new];
+    auto* att = p.colorAttachments[0];
+    att.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    att.writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+    att.blendingEnabled = YES;
+    att.sourceRGBBlendFactor = att.sourceAlphaBlendFactor = MTLBlendFactorOne;
+    att.destinationRGBBlendFactor = att.destinationAlphaBlendFactor = MTLBlendFactorSourceAlpha;
+    p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    p.rasterSampleCount = g_samples;
+    g_particleOverPipeline = pipeline(p, @"particle_composite");
+    // (A fragment's color is clamped to 0..1 before it's blended into the
+    // EFB, so what the particles take away is subtracted by a second draw.)
+    att.destinationRGBBlendFactor = att.destinationAlphaBlendFactor = MTLBlendFactorOne;
+    att.rgbBlendOperation = att.alphaBlendOperation = MTLBlendOperationReverseSubtract;
+    g_particleSubtractPipeline = pipeline(p, @"particle_composite");
+
+    MTLDepthStencilDescriptor* depth = [MTLDepthStencilDescriptor new];
+    depth.depthCompareFunction = MTLCompareFunctionAlways;
+    g_particleNoDepth = [g_device newDepthStencilStateWithDescriptor:depth];
+    depth.depthWriteEnabled = YES;
+    g_particleDepthFill = [g_device newDepthStencilStateWithDescriptor:depth];
+}
+
+// FRONTLINE_PARTICLE_REPEAT=<n>: every collected draw is drawn n times, to
+// measure heavy smoke on a scene that has little (the picture is wrong).
+uint32_t ParticleRepeat() {
+    static const uint32_t repeat = [] {
+        const char* n = std::getenv("FRONTLINE_PARTICLE_REPEAT");
+        return n != nullptr ? (uint32_t)std::max(std::atoi(n), 1) : 1u;
+    }();
+    return repeat;
+}
+
+// Draws the collected batches into the open pass: the EFB's, or the particle
+// buffer's (`buffer`).
+void ParticleDraw(bool buffer) {
+    const double d = g_particleDivisor;
+    for (uint32_t r = 1; r < ParticleRepeat(); r++) {
+        const size_t n = g_particleBatches.size() / r;
+        for (size_t i = 0; i < n; i++) {
+            g_particleBatches.push_back(g_particleBatches[i]);
+        }
+    }
+    for (ParticleBatch& b : g_particleBatches) {
+        NSUInteger vOffset, iOffset;
+        id<MTLBuffer> vb = Upload(&g_particleVertices[b.firstFloat], (NSUInteger)b.numVertices * b.stride * 4, &vOffset);
+        id<MTLBuffer> ib = Upload(&g_particleIndices[b.firstIndex], (NSUInteger)b.numIndices * 2, &iOffset);
+        if (vb == nil || ib == nil) {
+            continue;
+        }
+        MTLViewport vp = b.viewport;
+        MTLScissorRect scissor = b.scissor;
+        if (buffer) {
+            b.shape.blend = (b.shape.blend & ~(1u << 9)) | kBufferBlend;  // (one sample: no alpha to coverage)
+            b.u.alphaCoverage = 0;
+            vp.originX /= d, vp.originY /= d, vp.width /= d, vp.height /= d;
+            const NSUInteger x1 = std::min<NSUInteger>((scissor.x + scissor.width + g_particleDivisor - 1) /
+                                                           g_particleDivisor, g_particleColor.width);
+            const NSUInteger y1 = std::min<NSUInteger>((scissor.y + scissor.height + g_particleDivisor - 1) /
+                                                           g_particleDivisor, g_particleColor.height);
+            scissor.x /= g_particleDivisor, scissor.y /= g_particleDivisor;
+            scissor.width = x1 - scissor.x, scissor.height = y1 - scissor.y;
+        }
+        id<MTLRenderPipelineState> pipeline = g_uber ? nil : Specialized(b.shape);
+        if (pipeline == nil) {
+            pipeline = Pipeline(b.shape.blend);
+            g_perf.uberDraws++;
+        }
+        VertexUniforms vertexUniforms;
+        std::memset(&vertexUniforms, 0, sizeof(vertexUniforms));
+        vertexUniforms.stride = b.stride;
+        vertexUniforms.numTexGens = b.numTexGens;
+        EncodeDraw(pipeline, b.depth, b.cull, vp, scissor, b.u, b.textures, b.samplers, vertexUniforms, vb, vOffset,
+                   ib, iOffset, b.numIndices);
+    }
+}
+
+// Draws the collected particles before whatever comes next: another draw
+// (`passStops` false), or the frame copy that stops the EFB's pass keeping
+// its color and clearing its depth (true; the copy then leaves the pass
+// stopped).
+void ParticleResolve(bool passStops) {
+    g_particlesHeld = false;
+    if (g_particleBatches.empty()) {
+        return;
+    }
+    const double screens = g_particlePixels * ParticleRepeat() / ((double)g_efbPixels[0] * g_efbPixels[1]);
+    bool buffer = g_particleDivisor > 1 && g_particleRect[2] > g_particleRect[0];
+    for (const ParticleBatch& b : g_particleBatches) {
+        buffer = buffer && ParticleBlend(b.shape.blend);
+    }
+    switch (g_particleMode) {
+    case kParticlesFull:
+        buffer = false;
+        break;
+    case kParticlesBuffer:
+        break;
+    case kParticlesCompare:
+        buffer = buffer && g_particleCompareBuffer;
+        break;
+    default:
+        buffer = buffer &&
+                 screens >= kParticleBufferFrom[passStops] * (g_particleBuffered ? kParticleBufferUntil : 1.0);
+    }
+    g_particleBuffered = buffer;
+    g_perf.particleBatches += g_particleBatches.size();
+    g_perf.particleScreens += screens;
+    g_perf.particleBuffered += buffer ? 1 : 0;
+    g_perf.particleStops += passStops ? 1 : 0;
+    g_copiedSinceDraw = false;
+    BeginPass();  // the EFB as it stands, with any clear a frame copy left
+    if (!buffer) {
+        ParticleCounting(1);
+        ParticleDraw(false);
+        if (g_visibilityOn) {
+            [g_encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+            g_visibilityOn = false;
+        }
+    } else {
+        // The EFB's pass stops here, keeping its color and depth, and resumes
+        // with the buffer laid over it (BeginPass) at the next draw or copy.
+        // (With MSAA the color is resolved too, though nothing reads it yet:
+        // a pass with a resolve texture has to.)
+        EndPass();
+        MakeParticleBuffer();
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = g_particleColor;
+        pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+        pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);  // nothing added, everything shows
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        pass.depthAttachment.texture = g_particleDepth;
+        pass.depthAttachment.loadAction = MTLLoadActionDontCare;
+        pass.depthAttachment.storeAction = MTLStoreActionDontCare;
+        if (g_perf.on && g_visibility != nil) {
+            pass.visibilityResultBuffer = g_visibility;
+        }
+        g_encoder = [g_commands renderCommandEncoderWithDescriptor:pass];
+        [g_encoder setFrontFacingWinding:MTLWindingClockwise];
+        g_passCount++;
+        g_bindStamp++;
+        ResetBound();
+        const ParticleUniforms pu = ParticleBufferUniforms();
+        [g_encoder setRenderPipelineState:g_particleDepthPipeline];
+        [g_encoder setDepthStencilState:g_particleDepthFill];
+        [g_encoder setFragmentTexture:g_efbDepth atIndex:0];
+        [g_encoder setFragmentBytes:&pu length:sizeof(pu) atIndex:0];
+        [g_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        ParticleCounting(g_particleDivisor * g_particleDivisor * g_samples);
+        ParticleDraw(true);
+        g_visibilityOn = false;
+        [g_encoder endEncoding];
+        g_encoder = nil;
+        // Over the EFB: the rectangle the particles lie in, and a buffer pixel
+        // more each way for the smoothing.
+        const int32_t pad = (int32_t)g_particleDivisor;
+        const int32_t x0 = std::max(g_particleRect[0] - pad, 0), y0 = std::max(g_particleRect[1] - pad, 0);
+        const int32_t x1 = std::min(g_particleRect[2] + pad, (int32_t)g_efbPixels[0]);
+        const int32_t y1 = std::min(g_particleRect[3] + pad, (int32_t)g_efbPixels[1]);
+        g_particleCompositeRect = {(NSUInteger)x0, (NSUInteger)y0, (NSUInteger)(x1 - x0), (NSUInteger)(y1 - y0)};
+        g_particleCompositeSubtracts = false;
+        for (const ParticleBatch& b : g_particleBatches) {
+            g_particleCompositeSubtracts = g_particleCompositeSubtracts || (b.shape.blend & 3) == 3;
+        }
+        g_particleCompositePending = x1 > x0 && y1 > y0;
+    }
+    g_particleBatches.clear();
+    g_particleVertices.clear();
+    g_particleIndices.clear();
+    g_particlePixels = 0;
+    g_particleRect[0] = g_particleRect[1] = INT32_MAX;
+    g_particleRect[2] = g_particleRect[3] = INT32_MIN;
+}
+
+// Lays the particle buffer over the EFB, in the EFB's pass as it begins again.
+void ParticleComposite() {
+    g_particleCompositePending = false;
+    ParticleUniforms pu = ParticleBufferUniforms();
+    [g_encoder setRenderPipelineState:g_particleOverPipeline];
+    [g_encoder setDepthStencilState:g_particleNoDepth];
+    [g_encoder setScissorRect:g_particleCompositeRect];
+    [g_encoder setFragmentTexture:g_particleColor atIndex:0];
+    [g_encoder setFragmentBytes:&pu length:sizeof(pu) atIndex:0];
+    [g_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    if (g_particleCompositeSubtracts) {
+        pu.negative = 1;
+        [g_encoder setRenderPipelineState:g_particleSubtractPipeline];
+        [g_encoder setFragmentBytes:&pu length:sizeof(pu) atIndex:0];
+        [g_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    }
+}
+
+// Rewritten's ambient occlusion (the Ambient occlusion setting; gx_shader.cpp
+// ao_fragment): the level's world is baked vertex color, flat where things
+// meet the ground and in corners. Once a frame, when the game comes to its
+// particles (NativeParticles: the solid scene is drawn, nothing see-through
+// yet, and the weapon in hand and the HUD are still to come), the EFB's pass
+// stops as it does for the particle buffer; the occlusion is worked out from
+// its depth at half size and smoothed; and the pass resumes with it
+// multiplied into the color (AoComposite). It reads only depth, so both
+// renderers have it.
+// - Not in a frame the high frame rate only records, nor with a second EFB
+//   (the verify checks).
+// - FRONTLINE_AO=show draws the occlusion alone; =alternate has it only every
+//   other second of FRONTLINE_PERF's. FRONTLINE_AO_RADIUS (world units),
+//   FRONTLINE_AO_STRENGTH (0..1) and FRONTLINE_AO_REACH (world units) tune it.
+struct AoUniforms {
+    float proj[4];
+    float depth[4];
+    float rect[4];
+    float fog[4];
+    float shape[4];
+    float size[4];
+};
+id<MTLTexture> g_aoRaw, g_aoSmooth;
+id<MTLRenderPipelineState> g_aoPipeline, g_aoBlurPipeline, g_aoOverPipeline;
+AoUniforms g_aoUniforms;
+MTLScissorRect g_aoRect;
+uint32_t g_aoFrame = ~0u;  // the frame (g_frames) that has its occlusion
+
+void MakeAo() {
+    if (g_aoRaw != nil) {
+        return;
+    }
+    MTLTextureDescriptor* desc =
+        [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRG16Float
+                                                           width:(g_efbPixels[0] + 1) / 2
+                                                          height:(g_efbPixels[1] + 1) / 2
+                                                       mipmapped:NO];
+    desc.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    desc.storageMode = MTLStorageModePrivate;
+    g_aoRaw = [g_device newTextureWithDescriptor:desc];
+    desc.pixelFormat = MTLPixelFormatR8Unorm;
+    g_aoSmooth = [g_device newTextureWithDescriptor:desc];
+    auto pipeline = [](MTLRenderPipelineDescriptor* p, NSString* fragment) {
+        NSError* error = nil;
+        p.vertexFunction = [g_library newFunctionWithName:@"blit_vertex"];
+        p.fragmentFunction = [g_library newFunctionWithName:fragment];
+        id<MTLRenderPipelineState> state = [g_device newRenderPipelineStateWithDescriptor:p error:&error];
+        if (state == nil) {
+            std::fprintf(stderr, "frontline: ambient occlusion pipeline: %s\n", error.localizedDescription.UTF8String);
+            std::abort();
+        }
+        return state;
+    };
+    MTLRenderPipelineDescriptor* p = [MTLRenderPipelineDescriptor new];
+    p.colorAttachments[0].pixelFormat = MTLPixelFormatRG16Float;
+    g_aoPipeline = pipeline(p, g_samples > 1 ? @"ao_fragment_ms" : @"ao_fragment");
+    p.colorAttachments[0].pixelFormat = MTLPixelFormatR8Unorm;
+    g_aoBlurPipeline = pipeline(p, @"ao_blur");
+    // Over the EFB: its color times what stays lit (or, shown alone, instead of it).
+    p = [MTLRenderPipelineDescriptor new];
+    auto* att = p.colorAttachments[0];
+    att.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    att.writeMask = MTLColorWriteMaskRed | MTLColorWriteMaskGreen | MTLColorWriteMaskBlue;
+    if (!g_aoShow) {
+        att.blendingEnabled = YES;
+        att.sourceRGBBlendFactor = att.sourceAlphaBlendFactor = MTLBlendFactorZero;
+        att.destinationRGBBlendFactor = att.destinationAlphaBlendFactor = MTLBlendFactorSourceColor;
+    }
+    p.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    p.rasterSampleCount = g_samples;
+    g_aoOverPipeline = pipeline(p, @"ao_composite");
+    if (g_particleNoDepth == nil) {
+        MTLDepthStencilDescriptor* depth = [MTLDepthStencilDescriptor new];
+        depth.depthCompareFunction = MTLCompareFunctionAlways;
+        g_particleNoDepth = [g_device newDepthStencilStateWithDescriptor:depth];
+    }
+}
+
+// The solid scene is drawn: works out its occlusion, to go over the EFB when
+// its pass resumes.
+void OccludeScene() {
+    if (!g_ao || g_aoSkipped || g_recordOnly || Shadowed() || g_aoFrame == g_frames || g_drawClass != kDrawWorld) {
+        return;
+    }
+    // Only a perspective scene whose depth is in the EFB.
+    const State& s = g_state;
+    MTLViewport vp;
+    MTLScissorRect scissor;
+    if (s.projection[0] != 0.0f || g_clearDepthPending || g_commands == nil || !ViewportScissor(vp, scissor) ||
+        !(vp.width > 0) || !(vp.height > 0) || vp.zfar == vp.znear) {
+        return;
+    }
+    g_aoFrame = g_frames;
+    MakeAo();
+    AoUniforms& u = g_aoUniforms;
+    u = {{s.projection[1], s.projection[2], s.projection[3], s.projection[4]},
+         {s.projection[5], s.projection[6], (float)vp.znear, (float)vp.zfar},
+         {(float)vp.originX, (float)vp.originY, (float)vp.width, (float)vp.height},
+         {s.fog[0], s.fog[1], s.fog[2], s.fog[3]},
+         {g_aoRadius, g_aoStrength, g_aoReach, (float)(s.fogType & 7)},
+         {(float)g_efbPixels[0], (float)g_efbPixels[1], 0.0f, 0.0f}};
+    g_aoRect = scissor;
+    EndPass();
+    for (int step = 0; step < 2; step++) {
+        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.colorAttachments[0].texture = step == 0 ? g_aoRaw : g_aoSmooth;
+        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+        id<MTLRenderCommandEncoder> e = [g_commands renderCommandEncoderWithDescriptor:pass];
+        [e setRenderPipelineState:step == 0 ? g_aoPipeline : g_aoBlurPipeline];
+        [e setFragmentTexture:step == 0 ? g_efbDepth : g_aoRaw atIndex:0];
+        [e setFragmentBytes:&u length:sizeof(u) atIndex:0];
+        [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+        [e endEncoding];
+    }
+    g_passCount += 2;
+    g_aoCompositePending = true;
+}
+
+// Multiplies the occlusion into the EFB, in the EFB's pass as it begins again.
+void AoComposite() {
+    g_aoCompositePending = false;
+    [g_encoder setRenderPipelineState:g_aoOverPipeline];
+    [g_encoder setDepthStencilState:g_particleNoDepth];
+    [g_encoder setViewport:(MTLViewport){0, 0, (double)g_efbPixels[0], (double)g_efbPixels[1], 0, 1}];
+    [g_encoder setScissorRect:g_aoRect];
+    [g_encoder setFragmentTexture:g_aoSmooth atIndex:0];
+    [g_encoder setFragmentBytes:&g_aoUniforms length:sizeof(g_aoUniforms) atIndex:0];
+    [g_encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+}
+
 }  // namespace
 
 void SubmitTriangles(const float* vertices, uint32_t stride, uint32_t numVertices, const uint16_t* indices,
@@ -1327,8 +2140,25 @@ traced:
     if (s.cullMode == 3) {
         return;
     }
+    if (g_particles) {
+        g_perf.particleDraws++;
+        g_perf.particleQuads += numIndices / 6;
+        if (g_particlesSkipped) {
+            return;
+        }
+        if (g_particleBatching) {
+            ParticleAppend(vertices, stride, numVertices, indices, numIndices);
+            return;
+        }
+    }
+    if (g_particlesHeld) {
+        ParticleResolve(false);
+    }
     BeginPass();
     g_copiedSinceDraw = false;
+    if (g_particles) {
+        ParticleCounting(1);
+    }
     NSUInteger vOffset, iOffset;
     uint32_t vChunk = 0, iChunk = 0;
     id<MTLBuffer> vb, ib;
@@ -1398,62 +2228,8 @@ traced:
     if (g_recordOnly) {
         return;
     }
-    if (g_boundForeign) {
-        ResetBound();
-        g_boundForeign = false;
-    }
-    if (g_bound.pipeline != pipeline) {
-        [g_encoder setRenderPipelineState:pipeline];
-        g_bound.pipeline = pipeline;
-    }
-    if (g_bound.depth != depth) {
-        [g_encoder setDepthStencilState:depth];
-        g_bound.depth = depth;
-    }
-    if (g_bound.cull != cull) {
-        [g_encoder setCullMode:cull];
-        g_bound.cull = cull;
-    }
-    if (!g_bound.viewportSet || std::memcmp(&g_bound.viewport, &vp, sizeof(vp)) != 0) {
-        [g_encoder setViewport:vp];
-        g_bound.viewport = vp;
-        g_bound.viewportSet = true;
-    }
-    for (uint32_t m = 0; m < 8; m++) {
-        if (!(u.texValid & (1u << m))) {
-            continue;
-        }
-        if (g_bound.textures[m] != textures[m]) {
-            [g_encoder setFragmentTexture:textures[m] atIndex:m];
-            g_bound.textures[m] = textures[m];
-        }
-        if (g_bound.samplers[m] != samplers[m]) {
-            [g_encoder setFragmentSamplerState:samplers[m] atIndex:m];
-            g_bound.samplers[m] = samplers[m];
-        }
-    }
-    if (!g_bound.scissorSet || std::memcmp(&g_bound.scissor, &scissor, sizeof(scissor)) != 0) {
-        [g_encoder setScissorRect:scissor];
-        g_bound.scissor = scissor;
-        g_bound.scissorSet = true;
-    }
-    [g_encoder setVertexBuffer:vb offset:vOffset atIndex:0];
-    if (std::memcmp(&g_bound.vertexUniforms, &vertexUniforms, sizeof(vertexUniforms)) != 0) {
-        [g_encoder setVertexBytes:&vertexUniforms length:sizeof(vertexUniforms) atIndex:1];
-        g_bound.vertexUniforms = vertexUniforms;
-    }
-    if (!g_bound.uniformsSet || std::memcmp(&g_bound.uniforms, &u, sizeof(u)) != 0) {
-        [g_encoder setFragmentBytes:&u length:sizeof(u) atIndex:0];
-        g_bound.uniforms = u;
-        g_bound.uniformsSet = true;
-    }
-    [g_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                          indexCount:numIndices
-                           indexType:MTLIndexTypeUInt16
-                         indexBuffer:ib
-                   indexBufferOffset:iOffset];
-
-    g_bindStamp++;
+    EncodeDraw(pipeline, depth, cull, vp, scissor, u, textures, samplers, vertexUniforms, vb, vOffset, ib, iOffset,
+               numIndices);
     if (g_shadowEncoder != nil && !g_mainOnly) {
         // FRONTLINE_GX_VERIFY: the same draw with the ubershader. FRONTLINE_NATIVE_VERIFY: the same draw.
         id<MTLRenderCommandEncoder> e = g_shadowEncoder;
@@ -1607,8 +2383,19 @@ void CopyDisp(void* dest, bool clear) {
     // A copy that clears Z leaves the EFB's depth unused: the next pass clears
     // it, so this one needn't store it.
     const bool clearDepth = clear && g_state.zUpdate;
-    BeginPass();  // so a copy with no draws still clears
-    EndPass(clearDepth, clear && g_state.colorUpdate);
+    // Held particles: if this copy keeps the color and clears the depth (the
+    // game's, before the weapon in hand), the particle buffer can come at
+    // this stop of the pass and go over the EFB when the next one starts.
+    bool stopped = false;
+    if (g_particlesHeld) {
+        const bool passStops = clearDepth && !g_state.colorUpdate && !g_recordOnly;
+        ParticleResolve(passStops);
+        stopped = passStops && g_encoder == nil && g_particleCompositePending;
+    }
+    if (!stopped) {
+        BeginPass();  // so a copy with no draws still clears
+        EndPass(clearDepth, clear && g_state.colorUpdate);
+    }
     g_copiedSinceDraw = true;
     if (g_hfr) {
         RecordCopy(g_record, Scaled(g_copySrc[0]), Scaled(g_copySrc[1]), copyWidth, copyHeight);
@@ -1827,6 +2614,20 @@ void EndRecordedFrame() {
     ReleaseRecord(r);
 }
 
+// Waits for the GPU to finish `commands`, delivering the game's interrupts
+// meanwhile. When the GPU is over its budget this wait is most of a frame,
+// and the sound's frame interrupts come every 5 ms: each wakes the game's
+// mixer thread (SNDDRV_audiocallback), which mixes the next 5 ms. Held back
+// until the wait ended they came three or four at once, the mixer ran once
+// for them all, and its last block played over and over: distorted sound
+// whenever the frame rate dropped.
+void WaitDelivering(id<MTLCommandBuffer> commands) {
+    while (commands.status < MTLCommandBufferStatusCompleted) {
+        usleep(500);
+        os::SafePoint();
+    }
+}
+
 void DrawDone() {
     const uint64_t start = g_perf.on ? NowNanos() : 0;
     // Metal hands back command buffers, encoders and pass descriptors
@@ -1844,9 +2645,9 @@ void DrawDone() {
         EndRecordedFrame();
     }
     if (g_sync && g_lastCommitted != nil) {
-        [g_lastCommitted waitUntilCompleted];
+        WaitDelivering(g_lastCommitted);
     } else if (g_previousFrame != nil) {
-        [g_previousFrame waitUntilCompleted];
+        WaitDelivering(g_previousFrame);
     }
     g_previousFrame = g_lastCommitted;
     if (g_perf.on) {
@@ -1855,6 +2656,9 @@ void DrawDone() {
 }
 
 EfbPass EfbOpen() {
+    if (g_particlesHeld) {
+        ParticleResolve(false);
+    }
     BeginPass();
     g_copiedSinceDraw = false;
     return {g_encoder, g_shadowEncoder, g_bindStamp};
@@ -1966,6 +2770,14 @@ void frontline::os::ResetGx() {
         [g_lastCommitted waitUntilCompleted];
     }
     g_previousFrame = nil;
+    g_particles = false;
+    g_particlesHeld = false;
+    g_particleBatches.clear();
+    g_particleVertices.clear();
+    g_particleIndices.clear();
+    g_particlePixels = 0;
+    g_particleRect[0] = g_particleRect[1] = INT32_MAX;
+    g_particleRect[2] = g_particleRect[3] = INT32_MIN;
     if (g_textures.entries != nullptr) {
         for (uint32_t i = 0; i <= g_textures.mask; i++) {
             if (g_textures.entries[i].texture != nullptr) {
@@ -1976,6 +2788,85 @@ void frontline::os::ResetGx() {
         g_textures.count = 0;
     }
 }
+
+// Exit Game, before the stopped game starts again (no game thread runs, and
+// ResetGx waited for the GPU): if the run's settings changed, everything made
+// for the old ones goes, to be made again at the next draw. That's the EFB's
+// textures, the particle buffer, the frame copies, and the pipelines and
+// samplers, which depend on MSAA and the mode's filtering. (The high frame
+// rate's recorder isn't covered: no app offers Exit Game with it.)
+void frontline::os::ForgetGxRunSettings() {
+    using namespace frontline::gx;
+    if (g_device == nil || !g_efbMade || CurrentRunSettings() == g_madeFor) {
+        return;
+    }
+    // Pipelines still compiling were made for the old settings: wait for them.
+    while (g_compiling > 0) {
+        TakeFinished();
+        if (g_compiling > 0) {
+            usleep(1000);
+        }
+    }
+    if (g_specializations.entries != nullptr) {
+        for (uint32_t i = 0; i <= g_specializations.mask; i++) {
+            if (g_specializations.entries[i].pipeline != nullptr) {
+                CFRelease(g_specializations.entries[i].pipeline);
+            }
+        }
+        std::free(g_specializations.entries);
+        g_specializations = {};
+    }
+    for (auto& pipeline : g_pipelines) {
+        pipeline = nil;
+    }
+    for (auto& sampler : g_samplers) {
+        sampler = nil;
+    }
+    g_efbColor = g_efbDepth = g_efbMsaa = nil;
+    g_shadowColor = g_shadowDepth = g_shadowMsaa = nil;
+    g_particleColor = g_particleDepth = nil;
+    g_aoRaw = g_aoSmooth = nil;
+    g_aoPipeline = g_aoBlurPipeline = g_aoOverPipeline = nil;
+    g_particleNoDepth = g_particleDepthFill = nil;
+    g_particleDepthPipeline = g_particleOverPipeline = g_particleSubtractPipeline = nil;
+    g_particleBatching = false;
+    g_particleDivisor = 0;
+    os_unfair_lock_lock(&g_xfbLock);
+    for (Xfb& x : g_xfbs) {
+        x.texture = nil;
+        x.addr = 0;
+    }
+    os_unfair_lock_unlock(&g_xfbLock);
+    g_efbMade = false;
+}
+
+extern "C" void NativeParticles(int on) {
+    using namespace frontline::gx;
+    if (on) {
+        OccludeScene();
+    }
+    g_particles = on != 0;
+    if (g_particleBatching) {
+        if (on && g_particlesHeld) {
+            ParticleResolve(false);
+        }
+        g_particlesHeld = !on;
+    }
+    if (!g_perf.on) {
+        return;
+    }
+    if (on) {
+        g_perf.particleStart = NowNanos();
+        return;
+    }
+    g_perf.particleNanos += NowNanos() - g_perf.particleStart;
+    if (g_visibilityOn && g_encoder != nil) {
+        [g_encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
+    }
+    g_visibilityOn = false;
+}
+
+extern "C" void NativePlainTextures(int on) { frontline::gx::g_plainTextures = on != 0; }
 
 extern "C" void NativeDrawClass(int cls) {
     static_assert(NATIVE_DRAW_WORLD == frontline::gx::kDrawWorld && NATIVE_DRAW_SKY == frontline::gx::kDrawSky &&

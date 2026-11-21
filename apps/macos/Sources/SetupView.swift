@@ -17,6 +17,10 @@ struct SetupView: View {
     @AppStorage(Settings.modernRenderer) private var modern = false
     @AppStorage(Settings.correctedLighting) private var corrected = false
     @AppStorage(Settings.blobShadows) private var shadows = false
+    @AppStorage(Settings.fastSmoke) private var fastSmoke = Settings.defaultFastSmoke
+    @AppStorage(Settings.bicubicTextures) private var bicubic = Settings.defaultBicubicTextures
+    @AppStorage(Settings.ambientOcclusion) private var occlusion = false
+    @AppStorage(Settings.flashLights) private var flashLights = false
     @AppStorage(Settings.unfairAI) private var unfairAI = false
     @AppStorage(Disc.key) private var discFolder = ""
 
@@ -59,6 +63,11 @@ struct SetupView: View {
                         Text("4× MSAA").tag(4)
                     }
                     .disabled(classic)
+                    Picker("Texture filtering", selection: classic ? .constant(false) : $bicubic) {
+                        Text("Bilinear (original)").tag(false)
+                        Text("Bicubic").tag(true)
+                    }
+                    .disabled(classic)
                     Picker("Draw distance", selection: classic ? .constant(1.0) : $drawDistance) {
                         ForEach(Settings.drawDistances, id: \.times) { distance in
                             Text(distance.name).tag(distance.times)
@@ -67,7 +76,7 @@ struct SetupView: View {
                     .disabled(classic)
                     Picker("Renderer", selection: classic ? .constant(false) : $modern) {
                         Text("GX (original)").tag(false)
-                        Text("Modern (in progress)").tag(true)
+                        Text("Modern").tag(true)
                     }
                     .disabled(classic)
                     Picker("Lighting", selection: classic || !modern ? .constant(false) : $corrected) {
@@ -75,9 +84,25 @@ struct SetupView: View {
                         Text("Corrected").tag(true)
                     }
                     .disabled(classic || !modern)
+                    Picker("Ambient occlusion",
+                           selection: classic || (highFrameRate && !modern) ? .constant(false) : $occlusion) {
+                        Text("Off (original)").tag(false)
+                        Text("On").tag(true)
+                    }
+                    .disabled(classic || (highFrameRate && !modern))
+                    Picker("Flash lighting", selection: classic ? .constant(false) : $flashLights) {
+                        Text("Off (original)").tag(false)
+                        Text("On").tag(true)
+                    }
+                    .disabled(classic)
                     Picker("Shadows", selection: classic ? .constant(false) : $shadows) {
                         Text("Off (original)").tag(false)
                         Text("Blob").tag(true)
+                    }
+                    .disabled(classic)
+                    Picker("Smoke", selection: classic ? .constant(false) : $fastSmoke) {
+                        Text("Fast").tag(true)
+                        Text("Full resolution").tag(false)
                     }
                     .disabled(classic)
                     if classic {
@@ -114,7 +139,7 @@ struct SetupView: View {
                         .disabled(classic)
                     Text(classic
                         ? "Classic keeps the original enemies."
-                        : "On Hard: enemies aim perfectly, know where you are, attack relentlessly and have three times the health.")
+                        : "On Hard: enemies aim perfectly, know where you are, attack relentlessly, punch rapidly up close and have three times the health.")
                         .foregroundStyle(.secondary)
                 }
 

@@ -75,6 +75,8 @@ bool g_loaded;
 
 }  // namespace
 
+void frontline::os::ForgetLoaderBlock() { std::memset(g_loaderBlock, 0, sizeof(g_loaderBlock)); }
+
 LoadElf* LoadElf::Get() {
     if (!g_loaded) {
         g_loaded = true;

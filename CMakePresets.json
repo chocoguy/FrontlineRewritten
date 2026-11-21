@@ -47,6 +47,29 @@
         "CMAKE_OSX_SYSROOT": "appletvsimulator",
         "FRONTLINE_DISC_IN_BUNDLE": "OFF"
       }
+    },
+    {
+      "name": "ios",
+      "displayName": "iPhone and iPad device (Xcode)",
+      "description": "iPhone and iPad build; pass -DFRONTLINE_DEVELOPMENT_TEAM=<Team ID> to sign for a device",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/ios",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphoneos"
+      }
+    },
+    {
+      "name": "ios-sim",
+      "displayName": "iPhone and iPad simulator (Xcode)",
+      "description": "iPhone and iPad simulator build; no signing needed. The disc isn't bundled: launch with FRONTLINE_DISC",
+      "generator": "Xcode",
+      "binaryDir": "${sourceDir}/build/ios-sim",
+      "cacheVariables": {
+        "CMAKE_SYSTEM_NAME": "iOS",
+        "CMAKE_OSX_SYSROOT": "iphonesimulator",
+        "FRONTLINE_DISC_IN_BUNDLE": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -57,6 +80,10 @@
     { "name": "tvos", "configurePreset": "tvos", "configuration": "Debug" },
     { "name": "tvos-release", "configurePreset": "tvos", "configuration": "RelWithDebInfo" },
     { "name": "tvos-sim", "configurePreset": "tvos-sim", "configuration": "Debug" },
-    { "name": "tvos-sim-release", "configurePreset": "tvos-sim", "configuration": "RelWithDebInfo" }
+    { "name": "tvos-sim-release", "configurePreset": "tvos-sim", "configuration": "RelWithDebInfo" },
+    { "name": "ios", "configurePreset": "ios", "configuration": "Debug" },
+    { "name": "ios-release", "configurePreset": "ios", "configuration": "RelWithDebInfo" },
+    { "name": "ios-sim", "configurePreset": "ios-sim", "configuration": "Debug" },
+    { "name": "ios-sim-release", "configurePreset": "ios-sim", "configuration": "RelWithDebInfo" }
   ]
 }

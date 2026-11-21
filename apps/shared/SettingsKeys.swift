@@ -27,6 +27,23 @@ enum Settings {
     /// is held. Applies while the game runs.
     static let fullAutoSpringfield = "fullAutoSpringfield"
 
+    /// Rewritten's mods: the game's catalog (platform/src/mods.cpp), each on
+    /// or off under `defaultsKey`. They apply from the next level started.
+    struct Mod: Identifiable {
+        let index: Int32
+        let key: String
+        let title: String
+        let summary: String
+
+        var id: String { key }
+        var defaultsKey: String { "mod." + key }
+    }
+
+    static let mods: [Mod] = (0..<FrontlineModCount()).map { i in
+        Mod(index: i, key: String(cString: FrontlineModKey(i)), title: String(cString: FrontlineModTitle(i)),
+            summary: String(cString: FrontlineModSummary(i)))
+    }
+
     /// Pause the game when the app goes to the background (on if unset).
     static let pauseInBackground = "pauseInBackground"
 
@@ -46,6 +63,39 @@ enum Settings {
         let share = defaults.object(forKey: pictureSize) == nil ? 1 : defaults.double(forKey: pictureSize)
         return pictureSizes.contains { $0.share == share } ? share : 1
     }
+
+    /// iPhone and iPad's touch controls: "auto" (the default: hidden while a
+    /// gamepad is played), "always" or "off".
+    static let touchControls = "touchControls"
+    static let touchAuto = "auto"
+    static let touchAlways = "always"
+    static let touchOff = "off"
+
+    static func touchControls(_ defaults: UserDefaults) -> String {
+        let mode = defaults.string(forKey: touchControls) ?? touchAuto
+        return [touchAuto, touchAlways, touchOff].contains(mode) ? mode : touchAuto
+    }
+
+    /// How opaque the touch controls are drawn (0.6 if unset).
+    static let touchOpacity = "touchOpacity"
+    static let touchOpacities: [(value: Double, name: String)] = [
+        (0.3, "Faint"), (0.6, "Normal"), (0.9, "Strong"),
+    ]
+
+    static func touchOpacity(_ defaults: UserDefaults) -> Double {
+        defaults.object(forKey: touchOpacity) == nil ? 0.6 : defaults.double(forKey: touchOpacity)
+    }
+
+    /// Touch look speed, a multiple of TouchControls' (1 if unset).
+    static let touchLookSensitivity = "touchLookSensitivity"
+
+    static func touchLookSensitivity(_ defaults: UserDefaults) -> Double {
+        let value = defaults.object(forKey: touchLookSensitivity) == nil ? 1 : defaults.double(forKey: touchLookSensitivity)
+        return min(max(value, 0.25), 4)
+    }
+
+    /// Dragging up looks down.
+    static let touchInvertLook = "touchInvertLook"
 
     // The setup screen's, for the whole run.
 
@@ -70,8 +120,19 @@ enum Settings {
     static let correctedLighting = "correctedLighting"
     /// The blob shadows under characters (Rewritten only).
     static let blobShadows = "blobShadows"
+    /// Heavy smoke and spray drawn at about the original resolution
+    /// (Rewritten only; on if unset).
+    static let fastSmoke = "fastSmoke"
+    /// Textures drawn larger than they are filtered bicubically, not
+    /// bilinearly (Rewritten only; on if unset).
+    static let bicubicTextures = "bicubicTextures"
+    /// Creases and the ground under things darkened (Rewritten only; not
+    /// with the high frame rate).
+    static let ambientOcclusion = "ambientOcclusion"
+    /// Gunfire and explosions light what's around them (Rewritten only).
+    static let flashLights = "flashLights"
     /// Unfair AI: Hard's enemies aim perfectly, sense everything, press the
-    /// attack and have three times the health (Rewritten only).
+    /// attack, punch rapidly up close and have three times the health (Rewritten only).
     static let unfairAI = "unfairAI"
 
     /// The render resolutions offered: lines on the 480-line screen.
@@ -85,6 +146,17 @@ enum Settings {
     }
 
     static let defaultMsaa = 4
+    static let defaultFastSmoke = true
+    static let defaultBicubicTextures = true
+
+    static func bicubicTextures(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: bicubicTextures) == nil ? defaultBicubicTextures
+                                                        : defaults.bool(forKey: bicubicTextures)
+    }
+
+    static func fastSmoke(_ defaults: UserDefaults) -> Bool {
+        defaults.object(forKey: fastSmoke) == nil ? defaultFastSmoke : defaults.bool(forKey: fastSmoke)
+    }
 
     static func msaa(_ defaults: UserDefaults) -> Int {
         defaults.object(forKey: msaa) == nil ? defaultMsaa : defaults.integer(forKey: msaa)
@@ -124,6 +196,10 @@ enum Settings {
         FrontlineSetModernRenderer(defaults.bool(forKey: modernRenderer))
         FrontlineSetCorrectedLighting(defaults.bool(forKey: correctedLighting))
         FrontlineSetBlobShadows(defaults.bool(forKey: blobShadows))
+        FrontlineSetFastSmoke(fastSmoke(defaults))
+        FrontlineSetBicubicTextures(bicubicTextures(defaults))
+        FrontlineSetAmbientOcclusion(defaults.bool(forKey: ambientOcclusion))
+        FrontlineSetFlashLights(defaults.bool(forKey: flashLights))
         FrontlineSetUnfairAI(defaults.bool(forKey: unfairAI))
         FrontlineSetPictureSize(Float(pictureSize(defaults)))
     }
@@ -132,5 +208,8 @@ enum Settings {
     static func applyLive(_ defaults: UserDefaults) {
         FrontlineSetFieldOfView(Float(fieldOfView(defaults)))
         FrontlineSetFullAutoSpringfield(defaults.bool(forKey: fullAutoSpringfield))
+        for mod in mods {
+            FrontlineSetModOn(mod.index, defaults.bool(forKey: mod.defaultsKey))
+        }
     }
 }

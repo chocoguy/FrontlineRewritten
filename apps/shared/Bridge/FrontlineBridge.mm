@@ -37,11 +37,25 @@ void FrontlineSetDrawDistance(float times) { frontline::SetDrawDistance(times); 
 void FrontlineSetModernRenderer(bool on) { frontline::SetModernRenderer(on); }
 void FrontlineSetCorrectedLighting(bool on) { frontline::SetCorrectedLighting(on); }
 void FrontlineSetBlobShadows(bool on) { frontline::SetBlobShadows(on); }
+void FrontlineSetFastSmoke(bool on) { frontline::SetFastSmoke(on); }
+void FrontlineSetBicubicTextures(bool on) { frontline::SetBicubicTextures(on); }
+void FrontlineSetAmbientOcclusion(bool on) { frontline::SetAmbientOcclusion(on); }
+void FrontlineSetFlashLights(bool on) { frontline::SetFlashLights(on); }
 void FrontlineSetUnfairAI(bool on) { frontline::SetUnfairAI(on); }
 void FrontlineSetFieldOfView(float degrees) { frontline::SetFieldOfView(degrees); }
 void FrontlineSetFullAutoSpringfield(bool on) { frontline::SetFullAutoSpringfield(on); }
+int FrontlineModCount(void) { return frontline::ModCount(); }
+const char* FrontlineModKey(int mod) { return frontline::ModKey(mod); }
+const char* FrontlineModTitle(int mod) { return frontline::ModTitle(mod); }
+const char* FrontlineModSummary(int mod) { return frontline::ModSummary(mod); }
+void FrontlineSetModOn(int mod, bool on) { frontline::SetModOn(mod, on); }
 
 bool FrontlineStart(const char* folder, const char* cardA) {
+    static frontline::GameMain s_gameMain;
+    if (frontline::GameStopped()) {
+        frontline::StartGame(s_gameMain);  // again, after Exit Game
+        return true;
+    }
     frontline::SetDiscRoot(folder);
     frontline::SetCardFolder(0, cardA);
     // The game image in the app's Frameworks folder, else where the build made it.
@@ -52,9 +66,16 @@ bool FrontlineStart(const char* folder, const char* cardA) {
     if (gameMain == nullptr) {
         return false;
     }
+    s_gameMain = gameMain;
     frontline::StartGame(gameMain);
     return true;
 }
+
+void FrontlineSetExitGameOffered(bool offered) { frontline::SetExitGameOffered(offered); }
+
+bool FrontlineTakeExitGameRequest(void) { return frontline::TakeExitGameRequest(); }
+
+bool FrontlineStopGame(void) { return frontline::StopGame(); }
 
 void FrontlineSetCardChangeCallback(void (*callback)(const char* path, bool removed)) {
     frontline::SetCardChangeCallback(callback);
@@ -134,6 +155,8 @@ void FrontlineSetKeyboardMouse(int port, uint32_t actions, float lookRight, floa
 }
 
 void FrontlineAddMouseLook(int port, float lookRight, float lookUp) { frontline::AddMouseLook(port, lookRight, lookUp); }
+
+void FrontlineAddTouchLook(int port, float lookRight, float lookUp) { frontline::AddTouchLook(port, lookRight, lookUp); }
 
 void FrontlinePressAction(int port, uint32_t actions) { frontline::PressAction(port, actions); }
 

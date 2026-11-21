@@ -94,6 +94,7 @@ std::atomic<int> g_freesPending;
 void (*g_gameFree)(void*);  // the game image's operator delete
 
 std::atomic<uint64_t> g_spinWaitNanos;  // SpinWaitNanos
+std::atomic<bool> g_haltedNow;  // SetHalted: no game thread, so interrupts are dropped
 
 OSThread g_mainThread;
 
@@ -589,7 +590,19 @@ void Unlock() { pthread_mutex_unlock(&g_lock); }
 
 uint64_t SpinWaitNanos() { return g_spinWaitNanos.load(std::memory_order_relaxed); }
 
+void SetHalted(bool halted) { g_haltedNow.store(halted, std::memory_order_release); }
+
+bool CanLeaveHere() {
+    pthread_mutex_lock(&g_lock);
+    const bool can = t_self != nullptr && g_running == t_self && g_interruptDepth == 0;
+    pthread_mutex_unlock(&g_lock);
+    return can;
+}
+
 void RaiseInterrupt(InterruptFn fn, void* arg) {
+    if (g_haltedNow.load(std::memory_order_acquire)) {
+        return;  // Exit Game: the game is stopped (the retrace and audio clocks keep ticking)
+    }
     pthread_mutex_lock(&g_queueLock);
     if (g_interruptCount == kMaxInterrupts) {
         std::fprintf(stderr, "frontline: interrupt queue overflow (the game isn't reaching safe points)\n");
@@ -651,7 +664,17 @@ void WakeupLocked(OSThreadQueue* queue) {
 
 using namespace frontline::os;
 
+bool frontline::GameStopped() { return Halted(); }
+
 void frontline::StartGame(int (*gameMain)()) {
+    if (Halted()) {
+        // Exit Game stopped it: a cold boot, with the run's settings as the
+        // app set them since.
+        ForgetLoaderBlock();
+        ForgetGxRunSettings();
+        Resume();
+        return;
+    }
     InstallCrashHandler();
     ArenaInit();
     StartAlarms();

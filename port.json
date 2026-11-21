@@ -1,0 +1,103 @@
+{
+  "schema": 1,
+  "id": "frontline-rewritten",
+  "name": "Frontline Rewritten",
+  "game": "Medal of Honor: Frontline (GameCube, USA)",
+  "version": "0.0.1",
+  "minAppVersion": "0.1.0",
+
+  "entry": "tools/tvos/port",
+  "commands": ["check", "prepare", "build", "clean"],
+
+  "requirements": {
+    "macOS": "27.0",
+    "arch": "arm64",
+    "xcode": "27.0",
+    "platforms": ["tvOS", "iOS", "macOS"],
+    "brew": ["cmake"],
+    "submodules": true,
+    "network": "prepare downloads decomp-toolkit (dtk) from GitHub once",
+    "diskGB": 4,
+    "firstBuildMinutes": 15
+  },
+
+  "account": {
+    "minimum": "paid",
+    "capabilities": [],
+    "bundleId": "com.frontlinerewritten.{team}"
+  },
+
+  "devices": {
+    "family": "appletv",
+    "minModel": "AppleTV14,1",
+    "minOS": "27.0"
+  },
+
+  "inputs": [
+    {
+      "id": "disc",
+      "label": "Medal of Honor: Frontline disc",
+      "help": "A disc image you made from your own copy, or a disc you extracted with Dolphin (the folder holding sys and files).",
+      "kind": "file-or-folder",
+      "extensions": ["iso", "gcm", "ciso", "gcz", "rvz", "wia", "tgc"],
+      "required": true,
+      "accept": [
+        { "name": "USA, revision 0", "gameId": "GMFE69", "revision": 0 }
+      ],
+      "verifiedBy": "check"
+    }
+  ],
+
+  "options": [
+    {
+      "id": "perf",
+      "label": "Print performance stats to the console",
+      "type": "bool",
+      "default": false,
+      "appliesAt": "launch",
+      "env": { "FRONTLINE_PERF": "1" }
+    }
+  ],
+
+  "stages": [
+    { "id": "tools", "label": "Getting the disc tools", "command": "prepare" },
+    { "id": "disc", "label": "Reading your disc", "command": "prepare" },
+    { "id": "executable", "label": "Checking the game's version", "command": "prepare" },
+    { "id": "extract", "label": "Extracting the font and memory card icon", "command": "prepare" },
+    { "id": "configure", "label": "Setting up the Xcode project", "command": "build" },
+    { "id": "compile", "label": "Compiling the game", "command": "build" },
+    { "id": "embed", "label": "Copying your disc into the app", "command": "build" },
+    { "id": "sign", "label": "Signing the app", "command": "build" }
+  ],
+
+  "artifact": {
+    "app": "FrontlineTV.app",
+    "sizeGB": 1.4
+  },
+
+  "saves": {
+    "strategy": "local",
+    "note": "Saves stay on the Apple TV: in the app's caches, with a backup in its settings that brings them back if tvOS clears the caches. Deleting the app deletes them."
+  },
+
+  "logs": {
+    "process": "FrontlineTV",
+    "files": [],
+    "console": true
+  },
+
+  "diagnose": [
+    {
+      "match": "frontline: no game image at",
+      "message": "The app was built without the game image. Build it again."
+    },
+    {
+      "match": "frontline: can't load the game image",
+      "message": "tvOS refused to load the game image, usually because it was signed by a different team than the app. Build it again."
+    },
+    {
+      "match": "frontline: audio output: no audio session",
+      "message": "The Apple TV gave the game no sound output. The game kept running without sound."
+    }
+  ]
+}

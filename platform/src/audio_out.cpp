@@ -39,6 +39,8 @@ float g_ring[kCapacity][2];
 std::atomic<uint32_t> g_write, g_read;  // frame counts; the ring index is the count mod kCapacity
 bool g_playing;                         // render thread only, or while the unit is stopped
 std::atomic<uint32_t> g_underruns, g_drops;
+// FRONTLINE_AUDIO_LOG (TakeStats): the least and most queued since it last asked, and what it last saw.
+uint32_t g_leastQueued = UINT32_MAX, g_mostQueued, g_seenUnderruns, g_seenDrops;
 
 OSStatus Render(void*, AudioUnitRenderActionFlags* flags, const AudioTimeStamp*, UInt32, UInt32 frames,
                 AudioBufferList* buffers) {
@@ -248,7 +250,10 @@ void Output(const int16_t (*frames)[2], uint32_t count) {
         return;
     }
     uint32_t write = g_write.load(std::memory_order_relaxed);
-    if (write - g_read.load(std::memory_order_acquire) + count > kMaxQueued) {
+    const uint32_t queued = write - g_read.load(std::memory_order_acquire);
+    g_leastQueued = queued < g_leastQueued ? queued : g_leastQueued;
+    g_mostQueued = queued > g_mostQueued ? queued : g_mostQueued;
+    if (queued + count > kMaxQueued) {
         g_drops.fetch_add(1, std::memory_order_relaxed);
         return;  // the device is behind: drop these
     }
@@ -266,6 +271,21 @@ void PrintStats() {
     uint32_t queued = g_write.load(std::memory_order_relaxed) - g_read.load(std::memory_order_relaxed);
     std::fprintf(stderr, "[ax] output: %.1f ms buffered, %u underruns, %u frames dropped\n", queued * 1000.0 / kRate,
                  g_underruns.load(std::memory_order_relaxed), g_drops.load(std::memory_order_relaxed));
+}
+
+OutputStats TakeStats() {
+    OutputStats s = {};
+    s.open = g_unit != nullptr;
+    const uint32_t underruns = g_underruns.load(std::memory_order_relaxed), drops = g_drops.load(std::memory_order_relaxed);
+    s.underruns = underruns - g_seenUnderruns;
+    s.drops = drops - g_seenDrops;
+    g_seenUnderruns = underruns;
+    g_seenDrops = drops;
+    s.leastMs = g_leastQueued == UINT32_MAX ? 0.0f : g_leastQueued * 1000.0f / kRate;
+    s.mostMs = g_mostQueued * 1000.0f / kRate;
+    g_leastQueued = UINT32_MAX;
+    g_mostQueued = 0;
+    return s;
 }
 
 }  // namespace frontline::audio

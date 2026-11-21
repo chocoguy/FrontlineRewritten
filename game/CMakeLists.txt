@@ -19,13 +19,16 @@ list(TRANSFORM FRONTLINE_GAME_SOURCES PREPEND "${_decomp}/")
 list(TRANSFORM FRONTLINE_GAME_CXX_C_SOURCES PREPEND "${_decomp}/")
 set_source_files_properties(${FRONTLINE_GAME_CXX_C_SOURCES} PROPERTIES LANGUAGE CXX)
 
-# A few units include data extracted from the user's DOL by the GameCube build
-# (the memory card icon and the built-in font).
-set(_extracted "${_decomp}/build/GMFE69/include")
+# A few units include data extracted from the user's DOL (the memory card icon
+# and the built-in font): by the GameCube build, or by tools/tvos/port prepare,
+# which passes its own folder.
+set(FRONTLINE_EXTRACTED_DIR "${_decomp}/build/GMFE69/include"
+    CACHE PATH "Headers extracted from the game's DOL (dtk dol split's include/)")
+set(_extracted "${FRONTLINE_EXTRACTED_DIR}")
 if(NOT EXISTS "${_extracted}/game/Moh2_InternalFont.inc")
     message(WARNING
-        "${_extracted} is missing. Build the GameCube reference first "
-        "(see FrontlineDecompiled/README.md); Moh2.cpp and MemoryCardGC.cpp need it.")
+        "${_extracted} is missing. Run tools/tvos/port prepare, or build the GameCube "
+        "reference (see FrontlineDecompiled/README.md); Moh2.cpp and MemoryCardGC.cpp need it.")
 endif()
 
 # The game is an image of its own (a Mach-O bundle the platform loads at
@@ -39,7 +42,7 @@ set_target_properties(frontline_game PROPERTIES
     PREFIX ""
     SUFFIX ".so"
     LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/game")
-if(FRONTLINE_TVOS)
+if(FRONTLINE_UIKIT)
     # The app signs it with its own identity when it embeds it.
     set_target_properties(frontline_game PROPERTIES XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED NO)
 endif()
@@ -49,6 +52,8 @@ endif()
 target_sources(frontline_game PRIVATE
     # What the platform calls in the game image (native/entry.h)
     native/entry.cpp
+    # Exit Game on the main menu (native/hooks.h, NativeExitGameOffered)
+    native/exit_game.cpp
     native/hint_icons.cpp
     native/prompts.cpp
     # Rewritten's changes to the level scripts (game/bsfile.h)
@@ -65,8 +70,14 @@ target_sources(frontline_game PRIVATE
     native/ai/state.cpp
     # Rewritten keeps the bodies of the dead (native/corpses.h)
     native/corpses.cpp
+    # Rewritten's mods (native/mods.h)
+    native/mods/mods.cpp
+    native/mods/enemy_fists.cpp
+    native/mods/enemy_knives.cpp
+    native/mods/flying.cpp
     # The Modern renderer's corrected lighting (native/lighting.h)
     native/render/scene_lights.cpp
+    native/render/flash_lights.cpp
     # Rewritten's blob shadows (native/shadows.h)
     native/render/blob_shadows.cpp)
 

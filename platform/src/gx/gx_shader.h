@@ -28,7 +28,10 @@ struct FragUniforms {
     float coordSize[8][4];
     uint32_t numIndStages;
     uint32_t alphaCoverage;  // the alpha test as alpha to coverage (gx_metal.mm AlphaCoverage)
-    uint32_t pad[2];
+    // Bit per texture map: magnified, it's read bicubically (Rewritten's
+    // Texture filtering; gx_shader.cpp SampleBicubic).
+    uint32_t texBicubic;
+    uint32_t pad;
 };
 
 // The vertex shader's (gx_shader.cpp VertexUniforms, which says what they

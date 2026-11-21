@@ -19,19 +19,12 @@ struct PadBindingsView: View {
                 Text("Connect a game controller to set up its buttons.").foregroundStyle(.secondary)
             } else {
                 if kinds.count > 1 {
-                    Picker("Controller", selection: $kind) {
-                        ForEach(kinds, id: \.self) { kind in
-                            Text(kind).tag(kind)
-                        }
-                    }
+                    ChoiceRow("Controller", selection: $kind, options: kinds.map { ($0, $0) })
                 }
                 Section("Buttons") {
                     ForEach(inputs) { input in
-                        Picker(selection: target(input)) {
-                            ForEach(PadBindings.targets, id: \.self) { target in
-                                Text(target.name).tag(target)
-                            }
-                        } label: {
+                        ChoiceRow(selection: target(input),
+                                  options: PadBindings.targets.map { ($0, $0.name) }) {
                             label(input)
                         }
                     }

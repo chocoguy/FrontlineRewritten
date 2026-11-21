@@ -56,6 +56,18 @@ void SetGameFree(void (*free)(void*));
 void TakeSnapshot(int (*gameMain)());
 bool CanReboot();  // the game runs from its own image, and the snapshot is taken
 [[noreturn]] void Reboot();
+// Exit Game: Halt, on the running game thread, reboots without starting
+// main() again; WaitForHalt (from the app) waits up to `seconds` for that to
+// finish. Resume starts main() again, if halted. While halted, interrupts
+// are dropped (SetHalted).
+[[noreturn]] void Halt();
+bool WaitForHalt(double seconds);
+bool Halted();
+void Resume();
+void SetHalted(bool halted);
+// Whether the calling thread is the running game thread, outside interrupt
+// handlers: where Reboot and Halt may be called.
+bool CanLeaveHere();
 
 // Each part's share, with no game thread running:
 // - thread.cpp: the running thread leaves without handing over; every other
@@ -81,5 +93,10 @@ void ResetCard();
 void ResetAudio();
 void ResetGx();
 void ResetMeshes();  // the Modern renderer's (mesh/mesh.cpp), after ResetGx
+// Before StartGame starts a game that Exit Game stopped: the next boot is a
+// cold one (game_hooks.cpp: no shell state handed over), and the GX backend
+// makes its EFB and pipelines again if the run's settings changed.
+void ForgetLoaderBlock();
+void ForgetGxRunSettings();
 
 }  // namespace frontline::os

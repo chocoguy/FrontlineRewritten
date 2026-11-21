@@ -189,6 +189,7 @@ void NativeBlobShadowLink(CDmaTag* tag, CTexture* texture, const float view[3][4
     }
     NativeGxSaveState();
     NativeMeshBin(NATIVE_BIN_WORLD);
+    NativePlainTextures(1);  // the blob and the chunks' alpha are only a mask
     SetUp(view);
     // The blob, clamped: it's drawn over whole chunks, and past the slab the
     // clamp reads its edge, which is empty (SetUp). Not mipmapped, and
@@ -213,6 +214,7 @@ void NativeBlobShadowLink(CDmaTag* tag, CTexture* texture, const float view[3][4
         }
         DrawNode(*(CPTNode*)queued->node);
     }
+    NativePlainTextures(0);
     NativeMeshBin(NATIVE_BIN_NONE);
     NativeGxRestoreState();
 }

@@ -23,6 +23,10 @@ bool g_highFrameRate;
 int g_msaa = 1;
 float g_drawDistance = 1.0f;
 bool g_modernRenderer, g_correctedLighting, g_blobShadows;
+bool g_fastSmoke = true;
+bool g_bicubicTextures = true;
+bool g_ambientOcclusion;
+bool g_flashLights;
 bool g_unfairAI;
 // Degrees across at 4:3; the app's Settings change it while the game runs.
 std::atomic<float> g_fieldOfView{70.0f};
@@ -51,7 +55,10 @@ int FullAutoOverride() {
 // FRONTLINE_MODE, FRONTLINE_RESOLUTION, FRONTLINE_WIDESCREEN, FRONTLINE_HFR,
 // FRONTLINE_MSAA, FRONTLINE_DRAW_DISTANCE, FRONTLINE_RENDERER=gx|modern,
 // FRONTLINE_LIGHTING=original|corrected, FRONTLINE_SHADOWS=off|blob,
-// FRONTLINE_UNFAIR_AI=0|1, once, over whatever the app set.
+// FRONTLINE_TEXTURE_FILTER=bilinear|bicubic, FRONTLINE_AO=0|1,
+// FRONTLINE_FLASH_LIGHTS=0|1,
+// FRONTLINE_UNFAIR_AI=0|1, once,
+// over whatever the app set.
 void ApplyOverrides() {
     if (g_overridden) {
         return;
@@ -85,6 +92,18 @@ void ApplyOverrides() {
     if (const char* shadows = std::getenv("FRONTLINE_SHADOWS")) {
         g_blobShadows = std::strcmp(shadows, "blob") == 0;
     }
+    if (const char* smoke = std::getenv("FRONTLINE_FAST_SMOKE")) {
+        g_fastSmoke = std::atoi(smoke) != 0;
+    }
+    if (const char* flash = std::getenv("FRONTLINE_FLASH_LIGHTS")) {
+        g_flashLights = std::atoi(flash) != 0;
+    }
+    if (const char* ao = std::getenv("FRONTLINE_AO")) {
+        g_ambientOcclusion = std::strcmp(ao, "0") != 0;
+    }
+    if (const char* filter = std::getenv("FRONTLINE_TEXTURE_FILTER")) {
+        g_bicubicTextures = std::strcmp(filter, "bilinear") != 0;
+    }
     if (const char* unfair = std::getenv("FRONTLINE_UNFAIR_AI")) {
         g_unfairAI = std::atoi(unfair) != 0;
     }
@@ -106,6 +125,10 @@ void frontline::SetDrawDistance(float times) { g_drawDistance = times; }
 void frontline::SetModernRenderer(bool on) { g_modernRenderer = on; }
 void frontline::SetCorrectedLighting(bool on) { g_correctedLighting = on; }
 void frontline::SetBlobShadows(bool on) { g_blobShadows = on; }
+void frontline::SetFastSmoke(bool on) { g_fastSmoke = on; }
+void frontline::SetBicubicTextures(bool on) { g_bicubicTextures = on; }
+void frontline::SetAmbientOcclusion(bool on) { g_ambientOcclusion = on; }
+void frontline::SetFlashLights(bool on) { g_flashLights = on; }
 void frontline::SetUnfairAI(bool on) { g_unfairAI = on; }
 
 void frontline::SetFieldOfView(float degrees) { g_fieldOfView.store(degrees, std::memory_order_relaxed); }
@@ -114,6 +137,13 @@ void frontline::SetFullAutoSpringfield(bool on) { g_fullAutoSpringfield.store(on
 // The Modern renderer draws as the game does, at 60: it has no recorded
 // frames to draw between the game's.
 bool frontline::HighFrameRate() { return Rewritten() && g_highFrameRate && NativeModernRender() == 0; }
+
+bool frontline::FastSmoke() { return Rewritten() && g_fastSmoke; }
+
+bool frontline::BicubicTextures() { return Rewritten() && g_bicubicTextures; }
+
+// The high frame rate only records frames, and the occlusion isn't recorded.
+bool frontline::AmbientOcclusion() { return Rewritten() && g_ambientOcclusion && !HighFrameRate(); }
 
 int frontline::MsaaSamples() { return Rewritten() && g_msaa >= 4 ? 4 : 1; }
 
@@ -151,6 +181,8 @@ extern "C" int NativeModernRender(void) { return Rewritten() && g_modernRenderer
 extern "C" int NativeCorrectedLighting(void) { return NativeModernRender() != 0 && g_correctedLighting ? 1 : 0; }
 
 extern "C" int NativeBlobShadows(void) { return Rewritten() && g_blobShadows ? 1 : 0; }
+
+extern "C" int NativeFlashLights(void) { return Rewritten() && g_flashLights ? 1 : 0; }
 
 extern "C" int NativeUnfairAI(void) { return Rewritten() && g_unfairAI ? 1 : 0; }
 

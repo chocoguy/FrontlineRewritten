@@ -204,7 +204,30 @@ void DecodeLinearTexture(const uint8_t* src, uint32_t format, uint32_t width, ui
     }
 }
 
+namespace {
+
+// Light for an 8-bit color (the sRGB curve) and back. Averaging the colors
+// themselves makes a level darker than the texels it stands for look from
+// afar: black and white stripes come out 128, which shows as 22% of white's
+// light, not the 50% they send.
+struct LightTable {
+    float v[256];
+    LightTable() {
+        for (int i = 0; i < 256; i++) {
+            const float c = i / 255.0f;
+            v[i] = c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f);
+        }
+    }
+};
+uint8_t FromLight(float l) {
+    const float c = l <= 0.0031308f ? l * 12.92f : 1.055f * std::pow(l, 1.0f / 2.4f) - 0.055f;
+    return (uint8_t)std::lround(std::min(std::max(c, 0.0f), 1.0f) * 255.0f);
+}
+
+}  // namespace
+
 void Downsample(const uint8_t* src, uint32_t width, uint32_t height, uint8_t* dst) {
+    static const LightTable light;
     const uint32_t w = width > 1 ? width / 2 : 1, h = height > 1 ? height / 2 : 1;
     for (uint32_t y = 0; y < h; y++) {
         const uint32_t y0 = std::min(y * 2, height - 1), y1 = std::min(y * 2 + 1, height - 1);
@@ -214,10 +237,16 @@ void Downsample(const uint8_t* src, uint32_t width, uint32_t height, uint8_t* ds
                                    src + (y1 * width + x0) * 4, src + (y1 * width + x1) * 4};
             const uint32_t alpha = p[0][3] + p[1][3] + p[2][3] + p[3][3];
             for (int c = 0; c < 3; c++) {
-                dst[c] = alpha != 0 ? (uint8_t)((p[0][c] * p[0][3] + p[1][c] * p[1][3] + p[2][c] * p[2][3] +
-                                                 p[3][c] * p[3][3] + alpha / 2) /
-                                                alpha)
-                                    : (uint8_t)((p[0][c] + p[1][c] + p[2][c] + p[3][c] + 2) / 4);
+                if (p[0][c] == p[1][c] && p[0][c] == p[2][c] && p[0][c] == p[3][c]) {
+                    dst[c] = p[0][c];
+                } else if (alpha != 0) {
+                    dst[c] = FromLight((light.v[p[0][c]] * p[0][3] + light.v[p[1][c]] * p[1][3] +
+                                        light.v[p[2][c]] * p[2][3] + light.v[p[3][c]] * p[3][3]) /
+                                       alpha);
+                } else {
+                    dst[c] = FromLight((light.v[p[0][c]] + light.v[p[1][c]] + light.v[p[2][c]] + light.v[p[3][c]]) *
+                                       0.25f);
+                }
             }
             dst[3] = (uint8_t)((alpha + 2) / 4);
         }

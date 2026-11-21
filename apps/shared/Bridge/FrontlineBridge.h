@@ -38,8 +38,20 @@ void FrontlineSetDrawDistance(float times);
 void FrontlineSetModernRenderer(bool on);
 void FrontlineSetCorrectedLighting(bool on);
 void FrontlineSetBlobShadows(bool on);
+// Rewritten's fast smoke: heavy smoke and spray drawn at about the original
+// resolution and laid over the picture, instead of at the render's.
+void FrontlineSetFastSmoke(bool on);
+// Rewritten's texture filtering: textures drawn larger than they are read
+// bicubically (sharper and smoother) instead of bilinearly, as the original.
+void FrontlineSetBicubicTextures(bool on);
+// Rewritten's ambient occlusion: creases and the ground under things are
+// darkened, from the picture's depth. Off with the high frame rate.
+void FrontlineSetAmbientOcclusion(bool on);
+// Rewritten's flash lighting: gunfire and explosions light what's around
+// them for a moment.
+void FrontlineSetFlashLights(bool on);
 // Rewritten's Unfair AI: on Hard, enemies with perfect aim, full awareness,
-// extreme aggression and three times the health.
+// extreme aggression, rapid punches up close and three times the health.
 void FrontlineSetUnfairAI(bool on);
 // Rewritten's field of view, degrees across at 4:3 (70, the original, to
 // 110). It can change while the game runs.
@@ -47,12 +59,29 @@ void FrontlineSetFieldOfView(float degrees);
 // Rewritten's Full Auto Springfield: the Springfield fires for as long as the
 // trigger is held. It can change while the game runs.
 void FrontlineSetFullAutoSpringfield(bool on);
+// Rewritten's mods: the catalog, by index (a key to keep the choice under, a
+// title and a sentence), and which are on. The choice can change at any
+// time; the game takes it as each level starts.
+int FrontlineModCount(void);
+const char* FrontlineModKey(int mod);
+const char* FrontlineModTitle(int mod);
+const char* FrontlineModSummary(int mod);
+void FrontlineSetModOn(int mod, bool on);
 
 // Starts the game, reading the extracted disc in `folder`, with the memory
-// card in slot A kept in `cardA` (.gci files; null for no card). Call once, on
-// the main thread; the game runs on threads of its own. False if the game
-// image couldn't be loaded.
+// card in slot A kept in `cardA` (.gci files; null for no card). Call on the
+// main thread; the game runs on threads of its own. False if the game image
+// couldn't be loaded. After FrontlineStopGame, it starts the game again from
+// a cold boot, with the settings set since (`folder` and `cardA` stay).
 bool FrontlineStart(const char* folder, const char* cardA);
+
+// Exit Game: with it offered, the game's main menu shows "B EXIT GAME", and B
+// there makes FrontlineTakeExitGameRequest true once (poll it each refresh).
+// FrontlineStopGame stops the game in place for the setup screen: true once
+// it has stopped, false if it didn't within a few seconds (it keeps running).
+void FrontlineSetExitGameOffered(bool offered);
+bool FrontlineTakeExitGameRequest(void);
+bool FrontlineStopGame(void);
 
 // Called after each change to a memory card's files: the .gci at `path` was
 // written in full, or `removed`. It runs on a game thread and must return at
@@ -147,6 +176,9 @@ void FrontlineSetKeyboardMouse(int port, uint32_t actions, float lookRight, floa
 // FrontlineSetKeyboardMouse's: the high frame rate turns the view by it at
 // once.
 void FrontlineAddMouseLook(int port, float lookRight, float lookUp);
+// Look by touch (iOS's touch controls), as FrontlineAddMouseLook, except the
+// prompts stay the controller's.
+void FrontlineAddTouchLook(int port, float lookRight, float lookUp);
 // One press of `actions` at the game's next look, as if keys bound to them were
 // tapped. Pause does nothing unless the player is playing.
 void FrontlinePressAction(int port, uint32_t actions);

@@ -1,4 +1,4 @@
-# What the macOS and tvOS apps share: Bridge/ (a small Objective-C++ library
+# What the macOS, iOS and tvOS apps share: Bridge/ (a small Objective-C++ library
 # over the game and the platform layer, and the Swift apps' bridging header),
 # and Swift sources each app compiles in with its own.
 
@@ -8,11 +8,12 @@ target_link_libraries(frontline_bridge PUBLIC frontline_game_host)
 
 set(FRONTLINE_BRIDGING_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/Bridge/FrontlineBridge.h" PARENT_SCOPE)
 set(FRONTLINE_SHARED_SWIFT
+    "${CMAKE_CURRENT_SOURCE_DIR}/ChoiceRow.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/Controllers.swift"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ModsSection.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/PadBindings.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/PadBindingsView.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/Presenter.swift"
-    "${CMAKE_CURRENT_SOURCE_DIR}/SaveSync.swift"
     "${CMAKE_CURRENT_SOURCE_DIR}/SettingsKeys.swift"
     PARENT_SCOPE)
 

@@ -20,28 +20,17 @@
 	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
 	<key>CFBundleVersion</key>
 	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+	<!-- The release and commit built (the root CMakeLists), read back by the
+	     installer. -->
+	<key>FrontlineVersion</key>
+	<string>${FRONTLINE_VERSION}</string>
+	<key>FrontlineCommit</key>
+	<string>${FRONTLINE_COMMIT}</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.action-games</string>
-	<!-- The iCloud container the build is signed for; empty without a team
-	     (apps/ios/CMakeLists.txt). -->
-	<key>FrontlineICloudContainer</key>
-	<string>${FRONTLINE_ICLOUD_CONTAINER}</string>
-	<!-- Controllers drive the setup screen's focus; the game view turns that
-	     off while playing (GameViewController). -->
-	<key>GCSupportsControllerUserInteraction</key>
-	<true/>
-	<key>GCSupportedGameControllers</key>
-	<array>
-		<dict>
-			<key>ProfileName</key>
-			<string>ExtendedGamepad</string>
-		</dict>
-		<dict>
-			<key>ProfileName</key>
-			<string>MicroGamepad</string>
-		</dict>
-	</array>
-	<!-- tvOS 27 apps must use scenes; SceneDelegate (AppDelegate.swift). -->
+	<!-- The platform's own keys (apps/ios/CMakeLists.txt). -->
+${FRONTLINE_PLIST_PLATFORM_KEYS}
+	<!-- Apps on the 27 SDKs must use scenes; SceneDelegate (AppDelegate.swift). -->
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

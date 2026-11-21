@@ -523,9 +523,15 @@ void frontline::StartOffscreenDisplay(double rate) {
         &thread, nullptr,
         [](void*) -> void* {
             pthread_setname_np("frontline display");
+            // FRONTLINE_OFFSCREEN_SIZE=<w>x<h>: the screen's size in pixels, to
+            // measure what presenting to a big one costs (default 1280x960).
+            unsigned width = 1280, height = 960;
+            if (const char* size = std::getenv("FRONTLINE_OFFSCREEN_SIZE")) {
+                std::sscanf(size, "%ux%u", &width, &height);
+            }
             MTLTextureDescriptor* desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
-                                                                                            width:1280
-                                                                                           height:960
+                                                                                            width:width
+                                                                                           height:height
                                                                                         mipmapped:NO];
             desc.usage = MTLTextureUsageRenderTarget;
             desc.storageMode = MTLStorageModePrivate;

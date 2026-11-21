@@ -18,6 +18,12 @@
 	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
 	<key>CFBundleVersion</key>
 	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+	<!-- The release and commit built (the root CMakeLists), read back by the
+	     installer. -->
+	<key>FrontlineVersion</key>
+	<string>${FRONTLINE_VERSION}</string>
+	<key>FrontlineCommit</key>
+	<string>${FRONTLINE_COMMIT}</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.action-games</string>
 	<key>LSMinimumSystemVersion</key>

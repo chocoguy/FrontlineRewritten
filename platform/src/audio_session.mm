@@ -1,8 +1,9 @@
-// The shared audio session on tvOS, which RemoteIO plays through: its
+// The shared audio session on iOS and tvOS, which RemoteIO plays through: its
 // category, and the interruptions, route changes and media-server resets the
 // output unit (audio_out.cpp) has to follow.
 
 #import <AVFAudio/AVFAudio.h>
+#include <TargetConditionals.h>
 
 #include <cstdio>
 
@@ -14,7 +15,13 @@ frontline::audio::SessionEvents g_events;
 
 bool Activate(AVAudioSession* session) {
     NSError* error = nil;
-    if (![session setCategory:AVAudioSessionCategoryPlayback error:&error] ||
+#if TARGET_OS_TV
+    NSString* category = AVAudioSessionCategoryPlayback;
+#else
+    // A phone's game follows the silent switch, and stops other apps' sound.
+    NSString* category = AVAudioSessionCategorySoloAmbient;
+#endif
+    if (![session setCategory:category error:&error] ||
         ![session setActive:YES error:&error]) {
         std::fprintf(stderr, "frontline: audio session: %s\n", error.localizedDescription.UTF8String);
         return false;

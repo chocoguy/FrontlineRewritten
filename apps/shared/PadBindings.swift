@@ -8,9 +8,7 @@ import GameController
 /// and C sticks, with a swap and inverted vertical look.
 ///
 /// Saved in the `padBindings` default as JSON, kind -> `Profile`; a kind
-/// missing there plays with the defaults, which are the original mapping. On
-/// tvOS it's mirrored to iCloud's key-value storage, so it outlives the app's
-/// local data and follows the player to another Apple TV.
+/// missing there plays with the defaults, which are the original mapping.
 @MainActor
 enum PadBindings {
     /// A gamepad's buttons, in the controller screen's order.
@@ -196,9 +194,6 @@ enum PadBindings {
             return
         }
         UserDefaults.standard.set(data, forKey: key)
-        #if os(tvOS)
-        NSUbiquitousKeyValueStore.default.set(data, forKey: key)
-        #endif
     }
 
     private static func profiles() -> [String: Profile] {
@@ -210,25 +205,4 @@ enum PadBindings {
         cache = all
         return all
     }
-
-    #if os(tvOS)
-    /// Takes iCloud's copy, now and whenever another device changes it.
-    static func syncWithICloud() {
-        NSUbiquitousKeyValueStore.default.synchronize()
-        adoptICloud()
-        NotificationCenter.default.addObserver(forName: NSUbiquitousKeyValueStore.didChangeExternallyNotification,
-                                               object: nil, queue: .main) { _ in
-            MainActor.assumeIsolated {
-                adoptICloud()
-            }
-        }
-    }
-
-    private static func adoptICloud() {
-        if let data = NSUbiquitousKeyValueStore.default.data(forKey: key) {
-            UserDefaults.standard.set(data, forKey: key)
-            cache = nil
-        }
-    }
-    #endif
 }

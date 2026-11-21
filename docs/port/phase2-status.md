@@ -40,7 +40,7 @@ Each launch opens a setup screen in the game window (`apps/macos/Sources/SetupVi
 - **Unfair AI** (user default `unfairAI`, headless `FRONTLINE_UNFAIR_AI=1`): Rewritten only; see "Enemy AI".
 - **Disc folder.**
 
-Play saves the choices (user defaults `gameMode`, `renderLines`, `widescreen`, `highFrameRate`, `msaa`, `drawDistance`) and starts the game; they hold for the whole run. The game relaunches the app between levels (`LoadElf`), and the app then skips the setup screen (`FRONTLINE_RESTART` is set) and starts with the saved settings. Headless runs use `FRONTLINE_MODE=rewritten`, `FRONTLINE_RESOLUTION=<lines>`, `FRONTLINE_WIDESCREEN=<w>:<h>`, `FRONTLINE_HFR=1`, `FRONTLINE_MSAA=4` and `FRONTLINE_DRAW_DISTANCE=<times>`.
+Play saves the choices (user defaults `gameMode`, `renderLines`, `widescreen`, `highFrameRate`, `msaa`, `bicubicTextures`, `ambientOcclusion`, `flashLights`, `drawDistance`) and starts the game; they hold for the whole run. The game relaunches the app between levels (`LoadElf`), and the app then skips the setup screen (`FRONTLINE_RESTART` is set) and starts with the saved settings. Headless runs use `FRONTLINE_MODE=rewritten`, `FRONTLINE_RESOLUTION=<lines>`, `FRONTLINE_WIDESCREEN=<w>:<h>`, `FRONTLINE_HFR=1`, `FRONTLINE_MSAA=4` and `FRONTLINE_DRAW_DISTANCE=<times>`.
 
 - **Where the settings live:** the platform (`platform/src/settings.cpp`). In Classic it reports the original picture (scale 1, 640 wide) whatever the app set.
 - **What the game reads:** `NativeGameMode()` and `NativeRenderWidth()` (`native/hooks.h`). This is the ROADMAP's run-time mode switch; Classic is the default path.
@@ -92,6 +92,60 @@ Done 2026-10-27. Anti-aliasing, better texture filtering, smooth movies and a lo
   - Textures filtered nearest (the movie player's lookups, pixel-exact 2D) are left alone.
 - **Trilinear and 16x anisotropic** for every linearly filtered texture with mipmaps, the game's own included. The console goes to 4x anisotropic, and the game asks for 2x at most.
 - `FRONTLINE_GX_ORIGINAL_FILTERING=1` turns this off, for comparison.
+
+**Bicubic magnification** (done 2026-11-16; setup screen "Texture filtering: Bilinear (original) / Bicubic", Bicubic unless set; `FRONTLINE_TEXTURE_FILTER=bilinear|bicubic`):
+- The filtering above fixes textures seen small. Seen large, the game's 64–256 pixel textures were still bilinear: soft, with diamond-shaped blur, on the weapon in hand, near walls, the HUD and text.
+- **The filter** (`gx_shader.cpp` `SampleBicubic`): a Catmull-Rom curve over 4 × 4 texels, in 9 lookups at level 0 through the stage's own sampler, so wrap modes apply as always. The result is clamped to 0..1, since the curve overshoots at hard edges.
+- **Only where a texture is magnified:** from the coordinate's derivatives, texels a pixel. At 1 or more the sampler's trilinear and anisotropic lookup stands alone, with no extra lookups; bicubic comes in from there to twice the size, so no seam shows.
+- **Which lookups** (`FragUniforms::texBicubic`, a bit per texture map, set in `FillFragUniforms`): maps whose magnification filter is linear. Not nearest ones (the movie swizzle, pixel-exact 2D), not the movies' planes, not an indirect stage's map, whose texels are offsets, and nothing in the blob shadows' pass (`NativePlainTextures`, added 2026-11-17).
+  - **Why the shadows are excluded:** the pass redraws whole chunks of floor once for each soldier on them, reading the blob (stretched over the chunk) and the chunk's texture (for its cut-out alpha) only as a mask. Bicubic there cost about 6 ms a frame at 4K with 4x MSAA in the D-Day landing craft (14.4 ms against 8.2 with shadows off or 7.7 with bilinear), more with more soldiers: the slowdown in heavy action in the user's 2026-11-16 play session. With it excluded the landing craft takes 9.1 ms (6.9 without occlusion); the beach is unchanged at about 9.
+- **In the shape:** the mask is a function constant (`kTexBicubicFC`, 10) and part of `Shape`, so specialized pipelines fold it; the ubershader reads the uniform. `tev_fragment` and `tev_fragment_lit` share `Tev()`, so GX and the Modern renderer both have it.
+- **Look:** in one run switching each second (`FRONTLINE_TEXTURE_FILTER=alternate` with `FRONTLINE_PERF`), standing in the surf on D-Day at 1080p: the rifle's receiver and grain and the compass's markings are crisper, with no ringing on the HUD's numerals or the compass's rim. Fences, foliage and faces up close weren't compared.
+- **Cost:** 4K at 16:9 with 4x MSAA, D-Day in play, alternating seconds over 42 s: GPU 6.3 ms with, 5.8 without, 60 fps either way. The scene has shell bursts, so the half millisecond is rough.
+- **Checks:**
+  - Classic: 2,343 distinct frame copies through the intro and menus, the same set as the build before (`FRONTLINE_GX_HASH`).
+  - Rewritten at Bilinear: all 1,239 of the earlier build's distinct copies through the intro movies drawn again.
+  - `FRONTLINE_HFR_VERIFY`: 8,400 frames, none differing.
+  - `FRONTLINE_GX_VERIFY` with `FRONTLINE_MSAA=1` and bicubic on: tens to a few hundred pixels a copy, by up to 13/255, as with the made mipmaps alone.
+  - `FRONTLINE_NATIVE_VERIFY`: the same differences with Bicubic, with Bilinear and in the build before (per-pixel lighting against GX's), so none are the filter's.
+- Not tried on Apple TV.
+
+**Mipmaps made in light** (done 2026-11-16; `gx_texture.cpp` `Downsample`): a made level now averages its texels' light (the sRGB curve), not their stored colors. Averaged as stored, black and white stripes came out 128, which shows as 22% of white's light instead of 50%, so high-contrast textures darkened with distance; they come out 188 now. Flat colors come through unchanged, and the alpha weighting and coverage are as before. `tests/textest` checks it.
+- Every texture decoded through the intro, the menus and D-Day arrives with one level, so there are no partial chains to finish.
+- A sharper level-of-detail bias wasn't tried: whether it shimmers can only be judged in motion.
+
+**Ambient occlusion** (done 2026-11-16; setup screen "Ambient occlusion: Off (original) / On", Off unless set; `FRONTLINE_AO=0|1`): creases and the ground under things are darkened, from the picture's depth. The world is baked vertex color, flat where things meet.
+- **When** (`gx_metal.mm` `OccludeScene`): once a frame, as the game comes to its particles (`NativeParticles(1)`). The solid scene is drawn by then (world, props, characters), and nothing see-through, the weapon in hand or the HUD yet. In a level that point comes once every frame.
+- **How:** the EFB's pass stops there, as it does for the particle buffer. `ao_fragment` works the occlusion out at half size from the EFB's depth (sample 0 with MSAA): the eye-space point and its normal from depth, then eight points around it out to 0.9 units, turned by a pattern that repeats every four pixels. `ao_blur` smooths sixteen of those without crossing depth edges. The pass resumes with the result multiplied into the color (`AoComposite`, from `BeginPass`, before the particle buffer goes over).
+- **Fog and distance:** fog is drawn with each surface, so the occlusion keeps only the surface's share where fog lies over it, and fades out by 60 units. Nothing at the far plane.
+- **Both renderers:** it reads only depth.
+- **Not with:** the high frame rate (it only records frames; the setting is off with it), or a second EFB (`FRONTLINE_GX_VERIFY`, `FRONTLINE_NATIVE_VERIFY`), so those checks don't see it.
+- **Known limits:** see-through world surfaces (water, glass) write no depth, so what's behind them is occluded through them. The weapon in hand, drawn after its depth clear, has none. The half-size result is spread bilinearly, so a silhouette can carry a soft edge of it.
+- **Debugging:** `FRONTLINE_AO=show` draws the occlusion alone; `=alternate` has it every other second of `FRONTLINE_PERF`'s. `FRONTLINE_AO_RADIUS`, `FRONTLINE_AO_STRENGTH` (0..1) and `FRONTLINE_AO_REACH` tune it.
+- **Look:** in the boat on D-Day at 1080p, shown alone: shade under helmet rims, between packs and bodies and where soldiers stand against the hull, with no halos. In the picture it is subtle.
+- **Cost:** 4K at 16:9 with 4x MSAA, D-Day, alternating seconds over 74 s: GPU 8.0 ms with, 6.2 without, 60 fps either way. Over the 1.5 ms aimed for; stopping and resuming the multisampled pass is likely most of it (not measured apart).
+
+**Flash lighting** (done 2026-11-16; setup screen "Flash lighting: Off (original) / On", Off unless set; `FRONTLINE_FLASH_LIGHTS=0|1`): gunfire and explosions light what's around them for a moment.
+- **The game already has the lights** (`CLight`): the world bin lights each compartment node with up to three, over its baked color; characters and props take the strongest, or with Corrected lighting all of them per pixel. Levels place a few; nothing made one for a shot or a blast.
+- **What's new** (`game/native/render/flash_lights.cpp`): each shot and blast gets one of the game's instanced animated lights, playing an animation that fades and ends it (`CLight::CreateFlash`, native only, beside `Create`). They come from the instanced pool of 10, so the scene's light list (20) can't overflow; with the pool full a flash has no light.
+  - **A shot** (`CWeapon::FireBullet`, for weapons with a muzzle flash): warm white, 7 units, 4 frames, a little ahead of the muzzle (1.6 units for the player, whose shots leave from the eye).
+  - **A blast** (`CExplosion`): white-hot for two frames, then orange dying to red over 26 frames; three times the blast's radius, between 10 and 36 units.
+- **Per renderer:** GX lights the world per vertex and gives characters and props the strongest light. Modern lights the world per pixel, and with Corrected lighting characters and props too.
+- **Checks:**
+  - A green test light at the camera (`FRONTLINE_FLASH_TEST=<units ahead>`): soldiers and the landing craft turn green on both renderers (strongly on Modern with Corrected, a tint on GX), and so do the seabed and a beach obstacle.
+  - On D-Day the shell bursts and the soldiers' shots make lights (seen in a trace), with no crash over several 2-minute runs.
+  - GameCube build unchanged (`regress.py`: 0 dropped).
+- **Not checked:** the look of a real shot or blast (they last 4 and 26 frames; the one-a-second frame dumps don't catch them, and `FRONTLINE_FLASH_HOLD=<frames>` only holds a shot's), the player's own shots (the scripted input didn't fire), and the colors, reaches and lives, which are first guesses.
+- **Not known:** whether any level has the game's own grenade light (`thrownbullet.cpp`, id 0x9BCE1511). Where it does, a grenade would be lit twice.
+
+**Distorted sound below 60 fps** (found and fixed 2026-11-16): with the GPU over its budget (the app at 4K with 4x MSAA, Modern, Corrected, shadows, occlusion and flash lighting on a 6400 × 3600 screen: 19–25 ms a frame, 40–50 fps) the sound distorted.
+- **Cause:** `DrawDone` waited for the GPU with `waitUntilCompleted`, up to 14 ms without delivering interrupts. The sound's frame interrupts come every 5 ms, and each wakes the game's mixer thread (`SNDDRV_audiocallback`) to mix the next 5 ms. Held back, three or four came at once, the mixer ran once for them all, and its last block went out over and over.
+- **Fix:** `WaitDelivering` (`gx_metal.mm`) polls the command buffer and delivers interrupts between half-millisecond sleeps.
+- **How it was found:** `tools/audio_log_run.sh` plays the app with `FRONTLINE_AUDIO_LOG=1` (a line a second: voices, the mix's peak, the limiter, the gaps between frames, the output's buffer), `FRONTLINE_PERF` and a recording of the mix. In the user's run the output never ran dry; bursts of frames tracked every second under 60 fps exactly, and the recording had repeated 160-sample blocks wherever no AX voice covered them.
+- **Check:** headless with the GPU overloaded on purpose (smoke drawn 60 times at 4K): 167 of 200 frames a second came in bursts before, none after, with the longest gap between frames 7 ms. Not yet heard by the user.
+- **The frame rate itself** (found 2026-11-17): mostly bicubic filtering inside the blob shadows' pass, which grows with the soldiers on screen (see Bicubic magnification). Also on that screen: presenting at 6400 × 3600 (a 4K display in a scaled "looks like 3200 × 1800" mode) cost 1.6 ms headless at 120 Hz (`FRONTLINE_OFFSCREEN_SIZE=<w>x<h>` with `FRONTLINE_HFR_RATE`), and macOS's own downscaling to 4K isn't measurable from here. Occlusion costs 2–3.5 ms at 4K.
+
+**Checks for both** (2026-11-16): Classic drew all 2,343 of the earlier build's distinct frame copies through the intro and menus, and Rewritten with both off (and Bilinear) drew no copy the earlier build hadn't.
 
 **Anti-aliasing: 4x MSAA** (the setup screen's default in Rewritten; `FRONTLINE_MSAA=4`):
 - The EFB is drawn multisampled and resolved into the single-sample EFB texture as each pass ends, so frame copies read it as before.
@@ -351,6 +405,7 @@ So the GX layer records each frame's draws, and the display draws them again wit
 - **Perfect aim:** `NativeAIAdjustAim` puts the aim point on the target's current position plus the original's aim height and full lead, so the aim springs' lag and error drop out. Every soldier aims accurately (no attack tokens or misses), the aim error never restarts, and enemy shots leave without the weapon's spread (`NativeAIPerfectShot` in `CWeapon::FireBullet`). Shots are still limited to about 10 degrees off the gun barrel, as in the original.
 - **Awareness:** three times each enemy's sight range and hearing radius; reaction delays x0.1; a "player right there" radius of 15; every perception registration polled at once; callouts reach squadmates within 80 units after 0.2 s; and a hidden player's position stays known (aim and `m_lastSeenPosition` follow the player behind cover, although `m_targetVisible` stays honest, so the scripts still know they can't see them).
 - **Aggression:** 4 flankers, double the advance weight in cover scoring, a grenade every 3 s, a 0.1 s grenade warning, and a fourth script-bias column (charge roll x0.4, which turns 30/50/80% into about 73/100/100%; out-of-sight wait x0.2; off-cover and off-charge timers x0.2 and x0.1; fire bursts x2; waits behind cover x0.2).
+- **Rapid punches** (2026-11-02): an enemy within 2.2 of the player strikes every 0.35 s for 10 (20 from behind), holding its gun fire while it does. It's the Fist Fighters mod's melee; see [phase4-status.md](phase4-status.md#fist-fighters-enemy-fists-2026-11-02).
 - **Three times the health:** enemy soldiers take a third of each hit's damage (at least 1) from bullets (`HandleBulletCollision`, before the one-shot-kill cheat), explosions and melee impacts (`NativeAIDamageTaken`). The scripts keep their own health numbers, so this is the robust way to triple it. Tanks and other vehicles are unchanged.
 
 **Testing:**
@@ -469,6 +524,15 @@ The player's guns fire faster. The semi-automatics fire a shot for each trigger 
   - Classic kept the original 0.52 s rhythm. GameCube build unchanged (`regress.py`: 0 dropped).
   - Not checked: the automatics' new rates and the Springfield itself in play (none can be picked up early on the D-Day route), and the Settings toggle in the app.
 
+### Sniper rifle crosshair (Rewritten)
+
+The Springfield (15) and the Gewehr 43 (16) had no crosshair until they zoomed into the scope: their weapon entries in `level.viv` name only the scope overlay (`allied_`/`german_sniperoverlay.gsh`), with no crosshair sprite (field 5, `m_pSprite2`), so `CPlayerObject::Draw` skipped them.
+
+- `NativeLoadRifleCrosshair` (in `CPlayerObject::Init`, beside the mounted gun's crosshair) builds a sprite of `crosshair1.gsh`, the other guns' crosshair, which is in every level. `NativeRifleCrosshair` hands it to `Draw` for those two rifles when the weapon has none of its own (`native/weapons.h`, `game/native/weapons.cpp`).
+- It shows when the other guns' does (the crosshair option, on by default on Easy), and the scope still replaces it when zoomed. Single player and multiplayer.
+- **Mode:** Rewritten. Classic is unchanged.
+- **Checked** headless on D-Day (Easy) with a temporary override that drew the borrowed sprite for the Garand: it loaded and drew at the centre of the view. GameCube build unchanged (`regress.py`: 0 dropped). Not checked with the rifles themselves, which the D-Day route doesn't reach.
+
 ### Pause in the background (both modes)
 
 The game pauses itself when the app goes to the background or its window to the Dock. Before, it kept running with every key let go, so a player who switched apps mid-fight came back dead.
@@ -481,6 +545,12 @@ The game pauses itself when the app goes to the background or its window to the 
 ### Display stays awake (both modes)
 
 A game controller's input doesn't reset the system's idle timer, and long stretches play without any input (D-Day's landing), so the display dimmed and slept. `Power.swift` (`DisplayAwake`) holds an `IOPMAssertion` (`PreventUserIdleDisplaySleep`) while the game runs and the app is active, and lets it go in the background. `pmset -g assertions` shows it.
+
+### Skippable logo and title (Rewritten)
+
+At boot, the EA logo and the Medal of Honor title movie can be skipped with any face or menu button, as the intro movie already could (2026-11-14). Classic keeps them unskippable, as the original has them. `main()` in `Moh2.cpp` passes `skippable` to `RCMP_PlayMovie` (false on the GameCube). One press skips one movie: each is a separate play, and the movie player reads presses, not held buttons. Headless, Rewritten with START at 4.5 s and 6.5 s ended the logo at 86 frames and the title at 117, against 281 and 254 in Classic.
+
+Headless menu routes timed for Classic (START at 8 s and 12 s) land elsewhere in Rewritten, since those presses now skip the logo and title.
 
 ### Soft limiter (Rewritten)
 
@@ -867,6 +937,34 @@ Their lists set their own arrays as the compartments' do. Everything else comes 
 - **At 4K and 21:9,** the bins' lists take 2.1 ms natively against 7.3 with GX. GX also had 4 seconds with frames of 35–37 ms.
 - **The GPU** costs 0.6 ms more with Modern at 4K: per-pixel and corrected lighting.
 - **Worst frames:** the per-second worst frame is about 21 ms in every run, even at the menus with 0.5 ms of CPU. That's the headless runner's timing, not load.
+
+### Fast smoke (Rewritten; built 2026-11-13, not yet playtested)
+
+**The problem.** Heavy smoke and spray lagged the game, worst on the Apple TV (and in Dolphin too). The game keeps no particles: each frame every system draws every live emission as its own `GXBegin` of camera-facing quads, blended and depth tested but not written to depth (`CParticleSystem::RenderSystem`). The developers already halve the emission rate on D-Day.
+
+**Measured** (headless, D-Day's landing cutscene, the M5; `FRONTLINE_PERF`'s new `[perf] particles` line):
+- Particles blend 20–40 whole screens a frame in the worst seconds (the GPU counts the samples), from 250–850 draws of 4,000–14,000 quads.
+- At 4K with 4x MSAA that took the GPU from about 5 ms to 13–28 ms, and the Mac itself fell to 36–50 fps. At 1080p it was 3 ms to 5.5–7.7.
+- The CPU side is 1–3 ms a frame, nearly all the game's own per-particle work: merging 500 draws into 10 hardly changed it.
+
+**The fix** (`gx_metal.mm`, "Rewritten's particles"; the game's hook is `NativeParticles` around `CParticleSystemManager::Link`):
+- The scope's draws are collected and merged while the GX state stays the same, and their cover on screen is reckoned from the vertices (within a few percent of the GPU's count).
+- Light effects are drawn into the EFB exactly as before.
+- Heavy ones go to a particle buffer: one sample a pixel, at 1/2 of 1080p and 1440p and 1/3 of 4K each way (594 or 792 lines; none at 720p and below), with the farthest EFB depth under each pixel. It's then laid over the EFB.
+- The buffer needs the EFB's pass stopped. In play the game stops it itself right after the particles (the depth clear before the weapon), so the buffer is used from 4 screens; elsewhere (cutscenes, or a bullet trail drawn in between) from 10. It stays in use down to 0.7 of that.
+- Classic, the high frame rate and the verify modes draw particles as before.
+- **Setting:** Smoke: Fast / Full resolution on both setup screens (`fastSmoke`, on unless set; `FRONTLINE_FAST_SMOKE=0|1`).
+
+**Result** (4K, 4x MSAA, same cutscene): 60 fps throughout with the automatic choice, GPU 5.6–8.2 ms in the seconds that took 13–28.
+
+**Known limits:**
+- Spray's droplets are softer in the buffer; smoke looks the same. A quarter of 4K blurred droplets plainly, hence a third.
+- A particle's edge against something nearer is only as sharp as the buffer. No halos seen on helmets or the boat.
+- With little smoke the buffer costs about 1.5 ms of GPU at 4K, which is why light effects stay in the EFB.
+- Not measured on the Apple TV. The whole frame's CPU was 10–13 ms in this cutscene with the GX renderer on the M5, which may limit the TV apart from smoke.
+- The landing cutscene's camera differs between runs, so compare pictures within one run.
+
+**Tools:** `FRONTLINE_PARTICLES=off|alternate|direct|full|buffer|compare` (`compare` alternates buffer and EFB each second), `FRONTLINE_PARTICLE_DIVISOR=<n>`, `FRONTLINE_PARTICLE_REPEAT=<n>` (draws everything n times as a stress test).
 
 ## Next
 

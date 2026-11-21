@@ -13,6 +13,8 @@
 // is. The refire wait is all but gone, and a new pull during the firing
 // animation (about half a second) gets the 0x15 that fires again, so pulls
 // fire as fast as they come.
+//
+// The scoped rifles also get a crosshair here (native/weapons.h).
 
 #include "game/ISceneNode.h"
 #include "game/ShellMenu.h"
@@ -20,6 +22,7 @@
 #include "game/bstypes.h"
 #include "game/player.h"
 #include "game/player_weapon_object.h"
+#include "game/sprite.h"
 #include "game/weapon.h"
 #include "native/hooks.h"
 #include "native/weapons.h"
@@ -136,6 +139,12 @@ Trigger* TriggerOf(const CPlayerObject* player) {
     return free;
 }
 
+// The scoped rifles' crosshair: the other guns' sprite, built in place once
+// a level (the reboot between levels clears it, as it does the mounted gun's).
+const char kCrosshairFile[] = "crosshair1.gsh";
+CSprite* s_rifleCrosshair;
+alignas(CSprite) unsigned char s_rifleCrosshairMem[sizeof(CSprite)];
+
 }  // namespace
 
 int NativeRefireRate(const CWeapon* weapon) {
@@ -184,4 +193,20 @@ float NativeTriggerInput(const CPlayerObject* player, float fire) {
     }
     t->pull = 0.0f;
     return 0.0f;
+}
+
+void NativeLoadRifleCrosshair(void) {
+    if (NativeGameMode() != NATIVE_MODE_REWRITTEN || s_rifleCrosshair != NULL) {
+        return;
+    }
+    s_rifleCrosshair =
+        ::new (s_rifleCrosshairMem) CSprite(kCrosshairFile, (CSprite::ESpriteLoadType)1, (ERenderPriority)0xA);
+}
+
+CSprite* NativeRifleCrosshair(const CWeapon* weapon) {
+    if (NativeGameMode() != NATIVE_MODE_REWRITTEN || weapon == NULL ||
+        (weapon->m_weaponType != kSpringfield && weapon->m_weaponType != kGewehr43)) {
+        return NULL;
+    }
+    return s_rifleCrosshair;
 }

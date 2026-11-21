@@ -15,6 +15,7 @@
 #include <initializer_list>
 
 #include "frontline/platform.h"
+#include "native/hooks.h"
 #include "types.h"
 
 namespace {
@@ -87,8 +88,43 @@ int main(int argc, char** argv) {
     if (const char* rate = std::getenv("FRONTLINE_HFR_RATE")) {
         frontline::StartOffscreenDisplay(std::atof(rate));
     }
+    // FRONTLINE_EXIT_GAME=1 offers Exit Game on the main menu and confirms it
+    // at once, as the app would; the game starts again a second later, with
+    // FRONTLINE_EXIT_LINES=<lines>, FRONTLINE_EXIT_MSAA=<samples>,
+    // FRONTLINE_EXIT_MODE=classic|rewritten and FRONTLINE_EXIT_RENDERER=gx|modern
+    // as its new settings, if set.
+    const char* exitGame = std::getenv("FRONTLINE_EXIT_GAME");
+    const bool offerExit = exitGame != nullptr && std::atoi(exitGame) != 0;
+    frontline::SetExitGameOffered(offerExit);
+    double restartAt = -1;
     for (int i = 1; i <= seconds; i++) {
-        sleep(1);
+        for (int tick = 0; tick < 10; tick++) {
+            usleep(100000);
+            const double now = i - 1 + (tick + 1) / 10.0;
+            if (offerExit && frontline::TakeExitGameRequest()) {
+                const bool stopped = frontline::StopGame();
+                std::fprintf(stderr, "[headless] %.1f s: exit game: %s\n", now, stopped ? "stopped" : "still running");
+                restartAt = stopped ? now + 1 : -1;
+            }
+            if (restartAt >= 0 && now >= restartAt) {
+                restartAt = -1;
+                if (const char* lines = std::getenv("FRONTLINE_EXIT_LINES")) {
+                    frontline::SetRenderLines(std::atoi(lines));
+                }
+                if (const char* msaa = std::getenv("FRONTLINE_EXIT_MSAA")) {
+                    frontline::SetMsaa(std::atoi(msaa));
+                }
+                if (const char* mode = std::getenv("FRONTLINE_EXIT_MODE")) {
+                    frontline::SetGameMode(std::strcmp(mode, "rewritten") == 0 ? NATIVE_MODE_REWRITTEN
+                                                                               : NATIVE_MODE_CLASSIC);
+                }
+                if (const char* renderer = std::getenv("FRONTLINE_EXIT_RENDERER")) {
+                    frontline::SetModernRenderer(std::strcmp(renderer, "modern") == 0);
+                }
+                std::fprintf(stderr, "[headless] %.1f s: starting again\n", now);
+                frontline::StartGame(gameMain);
+            }
+        }
         frontline::DisplayedFrame f = frontline::GetDisplayedFrame();
         uint32_t w = 0, h = 0;
         bool rendered = frontline::ReadDisplayedFrame(nullptr, &w, &h);

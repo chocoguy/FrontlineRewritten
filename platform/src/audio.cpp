@@ -207,11 +207,81 @@ void TraceStart(const AXVPB& p) {
                  pb.mix.vAuxAL);
 }
 
+// FRONTLINE_AUDIO_LOG=1: a line a second (200 frames) on the sound's health,
+// to tell what kind of distortion is heard:
+// - the mix itself: how many voices ran, how far over full scale the mix
+//   went, how hard the limiter turned it down (or, without it, how many
+//   samples clipped);
+// - its timing: the longest wait between two frames (they come every 5 ms,
+//   as interrupts on the game thread, so a busy game delivers them late and
+//   in bursts), how many came in a burst, and the longest one took to mix;
+// - the output: how full its buffer ran, how often it ran dry (a gap) and
+//   how many frames it dropped (a skip).
+// FRONTLINE_AUDIO_DUMP's recording has the mix as made, before the output:
+// distortion heard but not in the recording is the timing's.
+struct AudioLog {
+    bool on;
+    uint64_t start, last;  // nanoseconds
+    u32 frames, seconds;
+    u32 voices, voicesMost;
+    s32 peak;
+    float gainLeast;
+    u32 limited, clipped, bursts, late;
+    double gapMost, mixMost;  // ms
+} g_log;
+
+uint64_t LogNanos() { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW); }
+
+void LogFrame(uint64_t began, const s16 (*frames)[2]) {
+    AudioLog& l = g_log;
+    const uint64_t now = LogNanos();
+    if (l.start == 0) {
+        l.start = l.last = began;
+        l.gainLeast = 1.0f;
+    }
+    const double gap = (began - l.last) * 1e-6;
+    l.last = began;
+    l.gapMost = gap > l.gapMost ? gap : l.gapMost;
+    l.bursts += gap < 1.0 && l.frames != 0;
+    l.mixMost = (now - began) * 1e-6 > l.mixMost ? (now - began) * 1e-6 : l.mixMost;
+    l.voicesMost = l.voices > l.voicesMost ? l.voices : l.voicesMost;
+    for (int i = 0; i < kFrameSamples; i++) {
+        for (int c = 0; c < 2; c++) {
+            const s32 v = g_bus[kMain][c][i] < 0 ? -g_bus[kMain][c][i] : g_bus[kMain][c][i];
+            l.peak = v > l.peak ? v : l.peak;
+            l.clipped += frames[i][c] >= 0x7FFF || frames[i][c] <= -0x8000;
+        }
+    }
+    if (LimiterOn()) {
+        const float gain = g_limiter.Gain();
+        l.gainLeast = gain < l.gainLeast ? gain : l.gainLeast;
+        l.limited += gain < 1.0f;
+    }
+    if (++l.frames < 200) {
+        return;
+    }
+    const frontline::audio::OutputStats out = frontline::audio::TakeStats();
+    std::fprintf(stderr,
+                 "[audio] %4.0f s | %2u voices | mix peak %.2fx full scale, limiter least gain %.2f (%u/200 frames), "
+                 "%u samples clipped | frame gap %.1f ms most, %u in bursts, %u late, mix %.2f ms most | "
+                 "buffer %.0f..%.0f ms, %u underruns, %u dropped%s\n",
+                 (now - l.start) * 1e-9, l.voicesMost, l.peak / 32768.0, l.gainLeast, l.limited, l.clipped, l.gapMost,
+                 l.bursts, l.late, l.mixMost, out.leastMs, out.mostMs, out.underruns, out.drops,
+                 out.open ? "" : " (no output device)");
+    l.frames = l.voicesMost = l.limited = l.clipped = l.bursts = l.late = 0;
+    l.peak = 0;
+    l.gainLeast = 1.0f;
+    l.gapMost = l.mixMost = 0.0;
+}
+
 void RunFrame() {
+    const uint64_t began = g_log.on ? LogNanos() : 0;
+    g_log.voices = 0;
     std::memset(g_bus, 0, sizeof(g_bus));
     for (AXVPB& p : g_voices) {
         if (p.pb.state == AX_PB_STATE_RUN) {
             MixVoice(p.pb);
+            g_log.voices++;
         }
     }
     // The aux A callback replaces the send with what goes back to the main mix.
@@ -238,6 +308,9 @@ void RunFrame() {
         }
     }
     frontline::audio::Output(frames, kFrameSamples);
+    if (g_log.on) {
+        LogFrame(began, frames);
+    }
     static u32 count;
     if (g_trace > 0 && ++count % 2000 == 0) {
         frontline::audio::PrintStats();
@@ -261,6 +334,7 @@ void AxFrame(void*) {
     }
     if (running) {
         late++;
+        g_log.late++;
         return;
     }
     running = true;
@@ -343,6 +417,7 @@ void AXInit(void) {
     g_axRunning = true;
     if (g_trace < 0) {
         g_trace = std::getenv("FRONTLINE_AUDIO_TRACE") != nullptr;
+        g_log.on = std::getenv("FRONTLINE_AUDIO_LOG") != nullptr;
     }
     frontline::audio::StartOutput();
     if (!started) {

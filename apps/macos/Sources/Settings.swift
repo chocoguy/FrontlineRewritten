@@ -55,6 +55,7 @@ struct SettingsView: View {
                      : "Classic keeps the original bolt action.")
                     .foregroundStyle(.secondary)
             }
+            ModsSection(rewritten: mode == Settings.rewritten)
             Section("Mouse") {
                 Slider(value: $sensitivity, in: 0.1...4) {
                     Text("Look speed")

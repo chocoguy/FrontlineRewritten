@@ -28,6 +28,8 @@ GameMain LoadGame(const char* path);
 // Runs the game's main() on the console's default thread (a game thread at
 // priority 16) and returns; the calling thread (the app's main thread) never
 // runs game code (docs/architecture/0002-threads-interrupts-and-time.md).
+// After StopGame, it starts the stopped game again instead (`gameMain` is
+// the same), as a cold boot.
 void StartGame(int (*gameMain)());
 
 // The extracted disc: the folder holding sys/ and files/. Without it, DVDInit
@@ -72,7 +74,7 @@ void SetCardFolder(int slot, const char* folder);
 
 // Called after each change to a memory card's files: the .gci at `path` was
 // written in full, or `removed`. It runs on the game's thread, so it must
-// return at once (the tvOS app hands the change to its iCloud sync).
+// return at once (the tvOS app backs the card up in its user defaults).
 using CardChangeCallback = void (*)(const char* path, bool removed);
 void SetCardChangeCallback(CardChangeCallback callback);
 
@@ -96,6 +98,20 @@ void SetCardChangeCallback(CardChangeCallback callback);
 //     of the original's (which light characters from the camera)
 //   blob shadows: the shadow under characters the game was designed with,
 //     which the GameCube version leaves out
+//   fast smoke: heavy smoke and spray are drawn into a buffer about the
+//     console's size and laid over the picture (gx_metal.mm, Rewritten's
+//     particles), instead of at the render's resolution; on unless set.
+//     FRONTLINE_FAST_SMOKE=0|1 overrides it.
+//   bicubic textures: textures drawn larger than they are get a sharper,
+//     smoother filter than the original's bilinear (gx_shader.cpp
+//     SampleBicubic); on unless set. FRONTLINE_TEXTURE_FILTER=
+//     bilinear|bicubic overrides it.
+//   ambient occlusion: creases and the ground under things are darkened,
+//     from the picture's depth (gx_metal.mm OccludeScene); off unless
+//     set, and off with the high frame rate. FRONTLINE_AO=0|1 overrides it.
+//   flash lights: gunfire and explosions light what's around them for a
+//     moment (game/native/render/flash_lights.cpp); off unless set.
+//     FRONTLINE_FLASH_LIGHTS=0|1 overrides it.
 //   Unfair AI: Hard's enemies aim perfectly, sense everything, press the
 //     attack and take a third of the damage (game/native/ai/)
 void SetGameMode(int mode);
@@ -107,6 +123,10 @@ void SetDrawDistance(float times);
 void SetModernRenderer(bool on);
 void SetCorrectedLighting(bool on);
 void SetBlobShadows(bool on);
+void SetFastSmoke(bool on);
+void SetBicubicTextures(bool on);
+void SetAmbientOcclusion(bool on);
+void SetFlashLights(bool on);
 void SetUnfairAI(bool on);
 
 // Rewritten's field of view, in degrees across at 4:3 (the original is 70),
@@ -121,8 +141,27 @@ void SetFieldOfView(float degrees);
 // (FRONTLINE_FULL_AUTO=0|1 overrides it).
 void SetFullAutoSpringfield(bool on);
 
+// Rewritten's mods (native/mods.h, platform/src/mods.cpp): the catalog, by
+// NATIVE_MOD_* (a key the app keeps the choice under, a title and a
+// sentence), and which are on. The choice can change at any time; the game
+// takes it as each level starts (FRONTLINE_MODS=<key>,<key> overrides it).
+int ModCount();
+const char* ModKey(int mod);
+const char* ModTitle(int mod);
+const char* ModSummary(int mod);
+void SetModOn(int mod, bool on);
+
 // Whether the high frame rate is on for this run (Rewritten only).
 bool HighFrameRate();
+
+// Whether heavy smoke goes to the particle buffer (Rewritten only).
+bool FastSmoke();
+
+// Whether magnified textures are filtered bicubically (Rewritten only).
+bool BicubicTextures();
+
+// Whether ambient occlusion is on for this run (Rewritten only).
+bool AmbientOcclusion();
 
 // Samples a pixel the GX layer renders with (1 in Classic).
 int MsaaSamples();
@@ -146,6 +185,9 @@ uint32_t GetPadMotor(int port);
 void SetKeyboardMouse(int port, uint32_t held, float lookRight, float lookUp, int wheel);
 // More mouse movement since the last take, as it comes.
 void AddMouseLook(int port, float lookRight, float lookUp);
+// Look by touch (iOS), the same as AddMouseLook's, but the prompts stay the
+// controller's: the touch controls' buttons stand in for its buttons.
+void AddTouchLook(int port, float lookRight, float lookUp);
 // One press of `action` at the game's next take, as if a key bound to it was
 // tapped (the app pauses the game this way when it goes to the background).
 void PressAction(int port, uint32_t action);
@@ -162,5 +204,17 @@ void SetKeyLabel(int label, const char* text);
 // the intro screens), when the mouse looks around rather than the menus
 // being up.
 bool IsPlaying();
+
+// Exit Game, back to the app's setup screen. With it offered, the main menu
+// shows "B EXIT GAME", and B there makes TakeExitGameRequest true once. The
+// app asks the player, and StopGame stops the game in place: it waits for the
+// game to halt (true), or gives up after a few seconds with the game still
+// running (false). StartGame then starts it again, from a cold boot, with
+// the settings set since.
+void SetExitGameOffered(bool offered);
+bool TakeExitGameRequest();
+bool StopGame();
+// Whether StopGame stopped the game, and it hasn't been started again.
+bool GameStopped();
 
 }  // namespace frontline

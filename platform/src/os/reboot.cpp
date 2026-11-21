@@ -17,10 +17,15 @@
 //
 // FRONTLINE_RESTART_EXEC=1 restarts the process instead, as before
 // (game_hooks.cpp).
+//
+// Exit Game (Halt) is a reboot that doesn't start main() again: the game is
+// put back the same way, and stays stopped until the app starts it again
+// (Resume), as a cold boot with the settings the app set since.
 
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <pthread.h>
+#include <time.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -58,6 +63,12 @@ size_t g_numArenaPages;
 
 int (*g_gameMain)();
 bool g_taken;
+
+// Halting: the game stops instead of starting again, and the app waits for it.
+bool g_halting;
+pthread_mutex_t g_haltLock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t g_haltDone = PTHREAD_COND_INITIALIZER;
+bool g_halted;
 unsigned g_reboots;
 
 void SaveImage() {
@@ -158,8 +169,18 @@ void* Rebooter(void*) {
     }
     g_reboots++;
     if (trace) {
-        std::fprintf(stderr, "frontline: reboot %u in %.1f ms\n", g_reboots,
+        std::fprintf(stderr, "frontline: %s %u in %.1f ms\n", g_halting ? "halt" : "reboot", g_reboots,
                      (clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start) / 1e6);
+    }
+    if (g_halting) {
+        // Interrupts raised from here on go nowhere: no game thread takes
+        // them until Resume, and the queue would overflow.
+        SetHalted(true);
+        pthread_mutex_lock(&g_haltLock);
+        g_halted = true;
+        pthread_cond_broadcast(&g_haltDone);
+        pthread_mutex_unlock(&g_haltLock);
+        return nullptr;
     }
     RestartMainThread(g_gameMain);
     return nullptr;
@@ -188,6 +209,48 @@ void TakeSnapshot(int (*gameMain)()) {
 }
 
 bool CanReboot() { return g_taken && g_numSegments > 0; }
+
+void Halt() {
+    g_halting = true;
+    Reboot();
+}
+
+bool WaitForHalt(double seconds) {
+    timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    const double end = until.tv_sec + until.tv_nsec / 1e9 + seconds;
+    until.tv_sec = (time_t)end;
+    until.tv_nsec = (long)((end - (double)until.tv_sec) * 1e9);
+    pthread_mutex_lock(&g_haltLock);
+    while (!g_halted) {
+        if (pthread_cond_timedwait(&g_haltDone, &g_haltLock, &until) != 0) {
+            break;
+        }
+    }
+    const bool halted = g_halted;
+    pthread_mutex_unlock(&g_haltLock);
+    return halted;
+}
+
+bool Halted() {
+    pthread_mutex_lock(&g_haltLock);
+    const bool halted = g_halted;
+    pthread_mutex_unlock(&g_haltLock);
+    return halted;
+}
+
+void Resume() {
+    pthread_mutex_lock(&g_haltLock);
+    const bool halted = g_halted;
+    g_halted = false;
+    pthread_mutex_unlock(&g_haltLock);
+    if (!halted) {
+        return;
+    }
+    g_halting = false;
+    SetHalted(false);
+    RestartMainThread(g_gameMain);
+}
 
 void Reboot() {
     pthread_t thread;

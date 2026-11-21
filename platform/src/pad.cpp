@@ -57,6 +57,14 @@ NativeInput g_keyboardMouse[4];
 uint32_t g_padActions[4];
 bool g_playing;
 
+// Exit Game (SetExitGameOffered): a press of B, on any controller, while
+// the main menu offers it asks the app (TakeExitGameRequest). The app
+// confirms with StopGame, and the game thread halts at its next input
+// update (NativeTakeInput).
+constexpr u16 kButtonB = 0x0200;  // PAD_BUTTON_B
+std::atomic<bool> g_exitOffered, g_atExitMenu, g_exitRequested, g_exitConfirmed;
+bool g_bHeld[4];
+
 // The device the on-screen controls show, and how often it changed.
 int g_promptDevice = NATIVE_DEVICE_KEYBOARD;
 unsigned g_promptDeviceChanges;
@@ -377,6 +385,16 @@ void frontline::AddMouseLook(int port, float lookRight, float lookUp) {
     }
 }
 
+void frontline::AddTouchLook(int port, float lookRight, float lookUp) {
+    pthread_mutex_lock(&g_lock);
+    g_keyboardMouse[port].lookRight += lookRight;
+    g_keyboardMouse[port].lookUp += lookUp;
+    pthread_mutex_unlock(&g_lock);
+    if (lookRight != 0 || lookUp != 0) {
+        UsedDevice(NATIVE_DEVICE_CONTROLLER);
+    }
+}
+
 void frontline::SetKeyLabel(int label, const char* text) {
     if (label >= 0 && label < NATIVE_NUM_LABELS) {
         pthread_mutex_lock(&g_lock);
@@ -407,6 +425,13 @@ extern "C" const char* NativeKeyLabel(int label) {
 bool frontline::IsPlaying() { return __atomic_load_n(&g_playing, __ATOMIC_RELAXED); }
 
 extern "C" void NativeTakeInput(int port, int playing, NativeInput* input) {
+    // Exit Game, confirmed: the game's input update, once a frame on its main
+    // loop, is where it halts (PADRead runs in the retrace interrupt).
+    if (port == 0 && g_exitConfirmed.load(std::memory_order_acquire) && frontline::os::CanLeaveHere()) {
+        g_exitConfirmed.store(false);
+        std::fprintf(stderr, "frontline: exiting the game\n");
+        frontline::os::Halt();
+    }
     pthread_mutex_lock(&g_lock);
     *input = g_keyboardMouse[port];
     input->held |= g_padActions[port];
@@ -478,16 +503,58 @@ bool frontline::PendingLook(uint32_t from, float* lookRight, float* lookUp) {
     return recent || look.lookRight != 0 || look.lookUp != 0;
 }
 
+namespace {
+
+// Exit Game: B pressed on the main menu (from PADRead).
+void NoteExitPresses(const PADStatus* status, const uint32_t* actions) {
+    for (int port = 0; port < 4; port++) {
+        const bool held = status[port].err == PAD_ERR_NONE &&
+                          ((status[port].button & kButtonB) != 0 || (actions[port] & NATIVE_ACTION_MENU_B) != 0);
+        if (held && !g_bHeld[port] && g_exitOffered.load(std::memory_order_relaxed) &&
+            g_atExitMenu.load(std::memory_order_relaxed)) {
+            g_exitRequested.store(true, std::memory_order_release);
+        }
+        g_bHeld[port] = held;
+    }
+}
+
+}  // namespace
+
+void frontline::SetExitGameOffered(bool offered) { g_exitOffered.store(offered, std::memory_order_relaxed); }
+
+bool frontline::TakeExitGameRequest() { return g_exitRequested.exchange(false, std::memory_order_acq_rel); }
+
+bool frontline::StopGame() {
+    if (os::Halted()) {
+        return true;
+    }
+    g_exitConfirmed.store(true, std::memory_order_release);
+    if (os::WaitForHalt(5)) {
+        return true;
+    }
+    g_exitConfirmed.store(false);  // the game didn't reach a read: it keeps running
+    return false;
+}
+
 extern "C" {
 
 u32 PADRead(PADStatus* status) {
     frontline::os::SafePoint();
     pthread_mutex_lock(&g_lock);
     std::memcpy(status, g_state, sizeof(g_state));
+    uint32_t actions[4];
+    std::memcpy(actions, g_padActions, sizeof(actions));
     pthread_mutex_unlock(&g_lock);
     ApplyScript(&status[0]);
+    NoteExitPresses(status, actions);
     return 0;
 }
+
+// Exit Game: the game says when the main menu shows it (NativeAtExitMenu), and
+// B there asks the app.
+int NativeExitGameOffered(void) { return g_exitOffered.load(std::memory_order_relaxed) ? 1 : 0; }
+
+void NativeAtExitMenu(int yes) { g_atExitMenu.store(yes != 0, std::memory_order_relaxed); }
 
 void PADClamp(PADStatus* status) {
     for (int i = 0; i < 4; i++, status++) {
@@ -537,4 +604,6 @@ void frontline::os::ResetPad() {
         motor = PAD_MOTOR_STOP;
     }
     __atomic_store_n(&g_playing, false, __ATOMIC_RELAXED);
+    g_atExitMenu.store(false);
+    g_exitRequested.store(false);
 }

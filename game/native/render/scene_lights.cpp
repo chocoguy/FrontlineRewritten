@@ -13,7 +13,10 @@
 #include "native/lighting.h"
 #include "native/render.h"
 
+void NativeFlashLightTest(const CMatrix& worldToCamera);  // flash_lights.cpp
+
 void NativeGatherSceneLights(const CLightDrawList* list, const CMatrix& worldToCamera) {
+    NativeFlashLightTest(worldToCamera);
     if (NativeCorrectedLighting() == 0) {
         return;
     }

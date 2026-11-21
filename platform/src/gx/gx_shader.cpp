@@ -28,6 +28,7 @@ constant uint kTexValidFC [[function_constant(6)]];
 constant uint kIndOrderFC [[function_constant(7)]];  // 8 bits an indirect stage: texcoord | map << 4
 constant uint kIndScaleFC [[function_constant(8)]];  // 8 bits an indirect stage: s | t << 4
 constant uint kAlphaCoverageFC [[function_constant(9)]];
+constant uint kTexBicubicFC [[function_constant(10)]];  // bit per texture map
 
 constant bool kSpecialized = is_function_constant_defined(kNumStagesFC);
 
@@ -74,7 +75,8 @@ struct Uniforms {
     float4 coordSize[8];
     uint numIndStages;
     uint alphaCoverage;
-    uint pad[2];
+    uint texBicubic;
+    uint pad;
 };
 
 // A vertex (gx_vertex.cpp): position, two colors, then `numTexGens`
@@ -240,6 +242,34 @@ static float2 Wrap(float2 c, uint2 w) {
     return r;
 }
 
+// Rewritten's bicubic magnification (FragUniforms::texBicubic): a texture
+// drawn larger than it is, read through a Catmull-Rom curve over 4 x 4 texels
+// instead of the sampler's straight lines between 2 x 2, which keeps edges
+// crisp and loses bilinear's diamond-shaped blur. Nine lookups: the sampler's
+// own filter folds each middle pair of texels into one, and its wrap modes
+// apply as always. Level 0, where a magnified texture is read.
+static float4 SampleBicubic(texture2d<float> t, sampler s, float2 st, float2 size) {
+    float2 at = st * size;
+    float2 base = floor(at - 0.5) + 0.5;  // the center of the texel up and left
+    float2 f = at - base;
+    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    float2 w3 = f * f * (-0.5 + 0.5 * f);
+    float2 w12 = w1 + w2;
+    float2 c0 = (base - 1.0) / size, c12 = (base + w2 / w12) / size, c3 = (base + 2.0) / size;
+    float4 sum = t.sample(s, float2(c0.x, c0.y), level(0.0)) * (w0.x * w0.y) +
+                 t.sample(s, float2(c12.x, c0.y), level(0.0)) * (w12.x * w0.y) +
+                 t.sample(s, float2(c3.x, c0.y), level(0.0)) * (w3.x * w0.y) +
+                 t.sample(s, float2(c0.x, c12.y), level(0.0)) * (w0.x * w12.y) +
+                 t.sample(s, float2(c12.x, c12.y), level(0.0)) * (w12.x * w12.y) +
+                 t.sample(s, float2(c3.x, c12.y), level(0.0)) * (w3.x * w12.y) +
+                 t.sample(s, float2(c0.x, c3.y), level(0.0)) * (w0.x * w3.y) +
+                 t.sample(s, float2(c12.x, c3.y), level(0.0)) * (w12.x * w3.y) +
+                 t.sample(s, float2(c3.x, c3.y), level(0.0)) * (w3.x * w3.y);
+    return saturate(sum);  // the curve overshoots at hard edges
+}
+
 // One TEV stage from its packed words: color inputs, alpha inputs, color op,
 // alpha op, order, constants and swaps, indirect.
 #define TEV_STAGE(CIN, AIN, COP, AOP, ORDER, KS, INDW) { \
@@ -275,6 +305,16 @@ static float2 Wrap(float2 c, uint2 w) {
         } \
         if (texValid & (1u << map)) { \
             tex = textures[map].sample(samplers[map], st); \
+            if (texBicubic & (1u << map)) { \
+                /* Texels a pixel: under 1 the texture is magnified. Bicubic */ \
+                /* comes in from there to twice the size, so no seam shows. */ \
+                float2 texels = st * u.texSize[map].xy; \
+                float rho = max(length(dfdx(texels)), length(dfdy(texels))); \
+                if (rho < 1.0) { \
+                    tex = mix(SampleBicubic(textures[map], samplers[map], st, u.texSize[map].xy), tex, \
+                              saturate(2.0 * rho - 1.0)); \
+                } \
+            } \
         } \
         tex = Swap(tex, u.swap[(ks >> 24) & 3]); \
     } \
@@ -347,6 +387,7 @@ static float4 Tev(VOut in, constant Uniforms& u, array<texture2d<float>, 8> text
     float4 regs[4] = {u.regs[0], u.regs[1], u.regs[2], u.regs[3]};
     const uint numStages = FC(kNumStagesFC, u.numStages);
     const uint texValid = FC(kTexValidFC, u.texValid);
+    const uint texBicubic = FC(kTexBicubicFC, u.texBicubic);
 
     // Indirect lookups: the texel's A, B, G as an offset source (8-bit format).
     float3 ind[4];
@@ -593,6 +634,165 @@ vertex BlitOut blit_vertex(uint vid [[vertex_id]]) {
 fragment float4 blit_fragment(BlitOut in [[stage_in]], texture2d<float> tex [[texture(0)]]) {
     constexpr sampler s(filter::linear);
     return float4(tex.sample(s, in.uv).rgb, 1.0);
+}
+
+// Rewritten's particle buffer (gx_metal.mm): heavy smoke is drawn into a
+// smaller buffer and laid over the EFB. `divisor`: the EFB's pixels along a
+// buffer pixel's side. `size`: the buffer's size in the EFB's pixels.
+struct ParticleUniforms {
+    uint divisor;
+    uint negative;
+    float2 size;
+};
+
+struct ParticleDepthOut {
+    float4 color [[color(0)]];
+    float depth [[depth(any)]];
+};
+
+// The buffer's depth: the farthest of the EFB's under each of its pixels, so
+// a particle shows wherever it shows in any of them.
+fragment ParticleDepthOut particle_depth(BlitOut in [[stage_in]], depth2d<float> depth [[texture(0)]],
+                                         constant ParticleUniforms& u [[buffer(0)]]) {
+    const uint2 base = uint2(in.pos.xy) * u.divisor;
+    const uint2 last = uint2(depth.get_width() - 1, depth.get_height() - 1);
+    float z = 0.0;
+    for (uint y = 0; y < u.divisor; y++) {
+        for (uint x = 0; x < u.divisor; x++) {
+            z = max(z, depth.read(min(base + uint2(x, y), last)));
+        }
+    }
+    ParticleDepthOut o;
+    o.color = float4(0.0);
+    o.depth = z;
+    return o;
+}
+
+fragment ParticleDepthOut particle_depth_ms(BlitOut in [[stage_in]], depth2d_ms<float> depth [[texture(0)]],
+                                            constant ParticleUniforms& u [[buffer(0)]]) {
+    const uint2 base = uint2(in.pos.xy) * u.divisor;
+    const uint2 last = uint2(depth.get_width() - 1, depth.get_height() - 1);
+    float z = 0.0;
+    for (uint y = 0; y < u.divisor; y++) {
+        for (uint x = 0; x < u.divisor; x++) {
+            z = max(z, depth.read(min(base + uint2(x, y), last), 0));
+        }
+    }
+    ParticleDepthOut o;
+    o.color = float4(0.0);
+    o.depth = z;
+    return o;
+}
+
+// The buffer over the EFB. Its color is what the particles add (less what
+// they take away: `negative` gives that part, to subtract), and its alpha how
+// much of what was behind them still shows.
+fragment float4 particle_composite(BlitOut in [[stage_in]], texture2d<float> particles [[texture(0)]],
+                                   constant ParticleUniforms& u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    const float4 c = particles.sample(s, in.pos.xy / u.size);
+    return u.negative != 0 ? float4(max(-c.rgb, 0.0), 1.0) : float4(max(c.rgb, 0.0), c.a);
+}
+
+// Rewritten's ambient occlusion (gx_metal.mm OccludeScene): creases and
+// the ground under things are darkened, from the EFB's depth alone. The
+// occlusion is worked out at half size (ao_fragment), smoothed without
+// crossing edges (ao_blur) and multiplied into the EFB (ao_composite),
+// before anything see-through is drawn.
+struct AoUniforms {
+    float4 proj;    // the projection's x scale and offset, y scale and offset (GXSetProjection)
+    float4 depth;   // its z scale and offset; the viewport's near and far
+    float4 rect;    // the viewport in the EFB's pixels: x, y, width, height
+    float4 fog;     // the fog registers (Uniforms::fog)
+    float4 shape;   // radius (world units), strength, how far it reaches (world units), fog type
+    float4 size;    // the EFB's size in pixels
+};
+
+// The eye-space point of an EFB pixel at depth `d`.
+static float3 AoEye(float2 pixel, float d, constant AoUniforms& u) {
+    const float z = (d - u.depth.z) / (u.depth.w - u.depth.z);
+    const float ez = u.depth.y / (1.0 - z - u.depth.x);
+    const float2 ndc = (pixel - u.rect.xy) / u.rect.zw * float2(2.0, -2.0) + float2(-1.0, 1.0);
+    return float3((-ndc.x - u.proj.y) * ez / u.proj.x, (-ndc.y - u.proj.w) * ez / u.proj.z, ez);
+}
+
+#define AO_SHADERS(NAME, DEPTH_T) \
+static float3 NAME##_at(DEPTH_T depth, float2 pixel, constant AoUniforms& u) { \
+    const float2 last = u.rect.xy + u.rect.zw - 1.0; \
+    const float2 p = clamp(floor(pixel), u.rect.xy, last); \
+    return AoEye(p + 0.5, depth.read(uint2(p), 0), u); \
+} \
+/* r: what stays lit, 1 for all of it. g: the eye-space depth, for the blur. */ \
+fragment float4 NAME(BlitOut in [[stage_in]], DEPTH_T depth [[texture(0)]], constant AoUniforms& u [[buffer(0)]]) { \
+    const float2 c = floor(in.pos.xy) * 2.0 + 0.5; \
+    const float d = depth.read(uint2(min(c, u.size.xy - 1.0)), 0); \
+    const float3 p = NAME##_at(depth, c, u); \
+    if (d >= 0.99999 || any(c < u.rect.xy) || any(c >= u.rect.xy + u.rect.zw) || -p.z > u.shape.z) { \
+        return float4(1.0, -p.z, 0.0, 1.0); \
+    } \
+    /* The surface's normal from its neighbors, taking each way the side */ \
+    /* that stays on the surface. */ \
+    const float3 px = NAME##_at(depth, c + float2(1.0, 0.0), u), mx = NAME##_at(depth, c - float2(1.0, 0.0), u); \
+    const float3 py = NAME##_at(depth, c + float2(0.0, 1.0), u), my = NAME##_at(depth, c - float2(0.0, 1.0), u); \
+    const float3 dx = abs(px.z - p.z) < abs(p.z - mx.z) ? px - p : p - mx; \
+    const float3 dy = abs(py.z - p.z) < abs(p.z - my.z) ? py - p : p - my; \
+    float3 n = normalize(cross(dx, dy)); \
+    if (dot(n, p) > 0.0) n = -n; \
+    /* Eight points around it on the screen, out to `radius` in the world, */ \
+    /* turned by a pattern that repeats every four pixels (ao_blur's size). */ \
+    const float radius = u.shape.x; \
+    const float pixels = min(radius * u.proj.x * u.rect.z * 0.5 / -p.z, 0.15 * u.rect.w); \
+    if (pixels < 1.5) { \
+        return float4(1.0, -p.z, 0.0, 1.0); \
+    } \
+    const uint2 cell = uint2(in.pos.xy) & 3u; \
+    const float turn = float(((cell.x + cell.y * 4u) * 7u) & 15u) * (6.2831853 / 16.0); \
+    float sum = 0.0; \
+    for (int i = 0; i < 8; i++) { \
+        const float a = turn + float(i) * 2.3999632; \
+        const float r = pixels * (float(i) + 0.75) / 8.0; \
+        const float3 v = NAME##_at(depth, c + float2(cos(a), sin(a)) * r, u) - p; \
+        const float len = length(v) + 1e-4; \
+        /* How far it rises above the surface, and nothing from out of reach. */ \
+        sum += saturate(dot(v, n) / len - 0.08) * saturate(1.0 - len / radius); \
+    } \
+    /* Less with distance, and only the surface's share where fog lies over */ \
+    /* it: the fog was drawn with it, and darkening that would darken the haze. */ \
+    float keep = u.shape.y * saturate(2.0 - 2.0 * -p.z / u.shape.z); \
+    if (uint(u.shape.w) >= 2) { \
+        const float z = min(floor(d * 16777216.0), 16777215.0); \
+        const float ze = u.fog.x * 16777216.0 / (u.fog.y - floor(z / exp2(u.fog.w))); \
+        keep *= 1.0 - clamp(ze - u.fog.z, 0.0, 1.0); \
+    } \
+    return float4(1.0 - keep * saturate(sum * (3.5 / 8.0)), -p.z, 0.0, 1.0); \
+}
+AO_SHADERS(ao_fragment, depth2d<float>)
+AO_SHADERS(ao_fragment_ms, depth2d_ms<float>)
+
+// Sixteen of ao_fragment's pixels, the turning pattern's size, weighed by how
+// near their depths are to this one's: an edge keeps its own side's.
+fragment float4 ao_blur(BlitOut in [[stage_in]], texture2d<float> ao [[texture(0)]]) {
+    const int2 at = int2(in.pos.xy);
+    const int2 last = int2(ao.get_width() - 1, ao.get_height() - 1);
+    const float ez = ao.read(uint2(at)).g;
+    float sum = 0.0, weight = 0.0;
+    for (int y = -2; y < 2; y++) {
+        for (int x = -2; x < 2; x++) {
+            const float4 t = ao.read(uint2(clamp(at + int2(x, y), int2(0), last)));
+            const float w = saturate(1.0 - abs(t.g - ez) / (0.04 * ez + 0.05)) + 1e-3;
+            sum += t.r * w;
+            weight += w;
+        }
+    }
+    return float4(sum / weight, 0.0, 0.0, 1.0);
+}
+
+// Over the EFB, which is multiplied by it (or, shown alone, replaced).
+fragment float4 ao_composite(BlitOut in [[stage_in]], texture2d<float> ao [[texture(0)]],
+                             constant AoUniforms& u [[buffer(0)]]) {
+    constexpr sampler s(filter::linear, address::clamp_to_edge);
+    const float lit = ao.sample(s, in.pos.xy / u.size.xy).r;
+    return float4(lit, lit, lit, 1.0);
 }
 )msl";
 

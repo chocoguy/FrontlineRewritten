@@ -17,6 +17,8 @@ import GameController
 /// no gamepad is connected: its touch surface or arrows are the D-pad, select
 /// is A, Back is B and Play/Pause is START.
 ///
+/// `touch` (iOS's touch controls) adds to controller 1's input.
+///
 /// A button can report a press that's over before the next read (a gamepad's
 /// Menu, the remote's Back), so presses are also caught as they happen and
 /// held until it.
@@ -24,6 +26,28 @@ import GameController
 final class Controllers {
     var separatePorts = false
     var remoteMenus = false
+    /// While an app dialog is up (tvOS's Exit Game), the game gets no input.
+    /// After, it gets none until everything is let go, so the press that
+    /// answered the dialog doesn't reach the game too.
+    var holdInput = false {
+        didSet {
+            if !holdInput {
+                waitForRelease = true
+            }
+        }
+    }
+    private var waitForRelease = false
+
+    /// The touch controls' input (iOS), added to controller 1's.
+    struct Touch {
+        var buttons: UInt16 = 0
+        var actions: UInt32 = 0
+        var stick = SIMD2<Float>.zero
+    }
+    var touch = Touch()
+    /// A gamepad has been used since this was last set to false (the touch
+    /// controls hide while one is played).
+    var gamepadUsed = false
 
     /// One controller's input at a read.
     private struct State {
@@ -41,6 +65,12 @@ final class Controllers {
             substick = Controllers.stronger(substick, other.substick)
             triggerLeft = max(triggerLeft, other.triggerLeft)
             triggerRight = max(triggerRight, other.triggerRight)
+        }
+
+        /// Nothing pressed, and the sticks about centred.
+        var idle: Bool {
+            buttons == 0 && actions == 0 && triggerLeft < 0.1 && triggerRight < 0.1 &&
+                (stick * stick).sum() < 0.09 && (substick * substick).sum() < 0.09
         }
     }
 
@@ -65,6 +95,7 @@ final class Controllers {
     /// for. Call once a refresh.
     func update() {
         let gamepads = GCController.controllers().filter { $0.extendedGamepad != nil }
+        var states: [(port: Int, state: State, connected: Bool)] = []
         if separatePorts {
             assignPorts(gamepads)
             for port in 0..<4 {
@@ -77,8 +108,7 @@ final class Controllers {
                 }
                 // Controller 1 is always connected: the remote (or the
                 // keyboard) drives it.
-                send(port, state, connected: port == 0 || ports[port] != nil)
-                rumbles[port].run(FrontlineRumble(Int32(port)), on: ports[port])
+                states.append((port, state, port == 0 || ports[port] != nil))
             }
         } else {
             var state = State()
@@ -90,11 +120,37 @@ final class Controllers {
             if remoteMenus && gamepads.isEmpty {
                 state.buttons |= readRemote()
             }
-            send(0, state, connected: true)
-            rumbles[0].run(FrontlineRumble(0), on: GCController.current)
+            states.append((0, state, true))
+        }
+        if !gamepads.isEmpty && !states.allSatisfy({ $0.state.idle }) {
+            gamepadUsed = true
+        }
+        if let first = states.firstIndex(where: { $0.port == 0 }) {
+            states[first].state.merge(State(buttons: touch.buttons, actions: touch.actions, stick: touch.stick))
+        }
+        if waitForRelease && !holdInput && states.allSatisfy({ $0.state.idle }) {
+            waitForRelease = false
+        }
+        let held = holdInput || waitForRelease
+        for (port, state, connected) in states {
+            send(port, held ? State() : state, connected: connected)
+        }
+        if separatePorts {
+            for port in 0..<4 {
+                rumbles[port].run(!held && FrontlineRumble(Int32(port)), on: ports[port])
+            }
+        } else {
+            rumbles[0].run(!held && FrontlineRumble(0), on: GCController.current)
         }
         latched = [:]
         latchedRemote = 0
+    }
+
+    /// Stops every controller's rumble (the game stopped).
+    func stopRumble() {
+        for rumble in rumbles {
+            rumble.run(false, on: nil)
+        }
     }
 
     /// Keeps each gamepad on the port it got, and gives a new one the first

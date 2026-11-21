@@ -1,0 +1,688 @@
+#!/usr/bin/env python3
+"""Builds the Apple TV, iPhone and iPad, or Mac app from your own disc: the entry point that port.json names.
+
+    tools/tvos/port check   [options]    what this Mac is missing, and whether the disc is the right one
+    tools/tvos/port prepare [options]    reads the disc: extracts it, checks the game's version, and pulls
+                                         out the pieces of the executable the build compiles in
+    tools/tvos/port build   [options]    prepares if it's needed, then builds and signs FrontlineTV.app
+                                         (Frontline.app with --platform ios, Frontline Rewritten.app with macos)
+    tools/tvos/port install --device D   installs the built app (--launch starts it too); on macos it goes
+                                         in Applications, with no --device
+    tools/tvos/port installed [options]  what's installed (the Mac's Applications, or --device): version, build
+    tools/tvos/port clean   [options]    removes the build and everything prepare made
+
+Options, each also a field of --context:
+    --platform P       tvos (the default: Apple TV), ios (iPhone and iPad) or macos (this Mac)
+    --disc PATH        a disc image (ISO, GCM, CISO, GCZ, RVZ, WIA, TGC) or an extracted disc folder
+    --team ID          the paid Apple Developer team that signs the app (default: the one signed in to Xcode)
+    --bundle-id ID     default: com.frontlinerewritten.<team ID>
+    --device UDID      the Apple TV, iPhone or iPad (xcrun devicectl list devices)
+    --work-dir DIR     where everything goes (default: build/port)
+    --context FILE     the same as JSON: {"team", "bundleId", "device", "workDir", "inputs": {"disc"}}
+    --json             one JSON event per line on stdout; the tools' own output goes to stderr
+
+Frontline Installer.app (at the repository's root) runs it with --json. Only Python 3's standard library is used.
+"""
+import argparse
+import datetime
+import hashlib
+import json
+import os
+import platform
+import plistlib
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+from typing import List, Optional
+
+ROOT = Path(__file__).resolve().parents[2]
+DECOMP = ROOT / 'FrontlineDecompiled'
+GAME_ID = 'GMFE69'
+IMAGE_TYPES = {'.iso', '.gcm', '.ciso', '.gcz', '.rvz', '.wia', '.tgc'}
+CONFIGURATION = 'RelWithDebInfo'
+# Per --platform: the CMake preset, the SDK, the app's target, the Xcode project's folder in the work
+# folder, the build's result, and what to call the device.
+PLATFORMS = {
+    'tvos': {'preset': 'tvos', 'sdk': 'appletvos', 'target': 'FrontlineTV', 'project': 'xcode',
+             'result': 'result.json', 'device': 'Apple TV', 'name': 'tvOS'},
+    'ios': {'preset': 'ios', 'sdk': 'iphoneos', 'target': 'Frontline', 'project': 'xcode-ios',
+            'result': 'result-ios.json', 'device': 'iPhone or iPad', 'name': 'iOS'},
+    # The Mac app signs itself ad hoc (no team) and finds the disc folder it's told about, so the disc
+    # stays out of it.
+    'macos': {'preset': 'xcode', 'sdk': 'macosx', 'target': 'FrontlineMac', 'project': 'xcode-mac',
+              'result': 'result-mac.json', 'device': 'Mac', 'name': 'macOS'},
+}
+MAC_APP = 'Frontline Rewritten.app'
+MAC_BUNDLE_ID = 'io.github.chocoguy.FrontlineRewritten'
+
+MIN_XCODE = (27, 0)
+MIN_CMAKE = (3, 31)
+
+JSON = False
+
+
+class Failure(Exception):
+    def __init__(self, code: str, message: str, fix: str = ''):
+        super().__init__(message)
+        self.code, self.message, self.fix = code, message, fix
+
+
+# Events --------------------------------------------------------------------------------------------
+
+def emit(event: str, **fields) -> None:
+    if JSON:
+        print(json.dumps({'event': event, **fields}), flush=True)
+        return
+    if event == 'stage':
+        print(f"==> {fields['label']}", flush=True)
+    elif event == 'check':
+        mark = 'ok ' if fields['ok'] else 'NO '
+        print(f"{mark} {fields['label']}: {fields['detail']}", flush=True)
+        if not fields['ok'] and fields.get('fix'):
+            print(f"    {fields['fix']}", flush=True)
+    elif event == 'error':
+        print(f"error: {fields['message']}", file=sys.stderr, flush=True)
+        if fields.get('fix'):
+            print(f"  {fields['fix']}", file=sys.stderr, flush=True)
+    elif event == 'warning':
+        print(f"warning: {fields['message']}", flush=True)
+    elif event == 'result':
+        print(f"Built {fields['app']}", flush=True)
+        if fields.get('expires'):
+            print(f"Its profile expires {fields['expires'][:10]}.", flush=True)
+    elif event == 'note':
+        print(fields['message'], flush=True)
+
+
+def stage(name: str, label: str) -> None:
+    emit('stage', id=name, label=label)
+
+
+def run(argv: list, **kwargs) -> subprocess.CompletedProcess:
+    return subprocess.run([str(a) for a in argv], capture_output=True, text=True, **kwargs)
+
+
+def stream(argv: list, cwd: Optional[Path] = None, on_line=None) -> int:
+    """Runs a tool with its output passed to stderr (stdout is the events' in --json mode)."""
+    process = subprocess.Popen([str(a) for a in argv], cwd=cwd, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, errors='replace')
+    for line in process.stdout:
+        sys.stderr.write(line)
+        if on_line:
+            on_line(line.rstrip('\n'))
+    return process.wait()
+
+
+# Context -------------------------------------------------------------------------------------------
+
+class Context:
+    def __init__(self, args):
+        data = {}
+        if args.context:
+            data = json.loads(Path(args.context).expanduser().read_text())
+        inputs = data.get('inputs') or {}
+        self.disc = args.disc or inputs.get('disc')
+        self.team = args.team or data.get('team') or ''
+        self.bundle_id = args.bundle_id or data.get('bundleId') or ''
+        self.device = getattr(args, 'device', None) or data.get('device') or ''
+        self.platform = args.platform or data.get('platform') or 'tvos'
+        if self.platform not in PLATFORMS:
+            raise Failure('platform', f'Unknown platform {self.platform}.', 'Pass --platform tvos or ios.')
+        self.p = PLATFORMS[self.platform]
+        work = args.work_dir or data.get('workDir') or str(ROOT / 'build' / 'port')
+        self.work = Path(work).expanduser().resolve()
+
+    def signing(self) -> None:
+        """Fills in the team and bundle ID, and stops early for a team that can't sign this app."""
+        teams = xcode_teams()
+        if not self.team:
+            paid = [t for t in teams if not t['free']]
+            if not paid:
+                raise Failure('paid-account-required' if teams else 'xcode-account',
+                              'No paid Apple Developer team is signed in to Xcode.',
+                              'An app signed by a free personal team stops opening after 7 days, so the port needs a paid membership. '
+                              'Sign in under Xcode > Settings > Accounts, or pass --team.')
+            self.team = paid[0]['id']
+        known = next((t for t in teams if t['id'] == self.team), None)
+        if not known:
+            raise Failure('xcode-account', f"Team {self.team} isn't signed in to Xcode.",
+                          'Sign in to its Apple ID under Xcode > Settings > Accounts.')
+        if known['free']:
+            raise Failure('paid-account-required', f"Team {self.team} is a free personal team.",
+                          'An app signed by a free personal team stops opening after 7 days, so the port needs a paid membership.')
+        if not self.bundle_id:
+            self.bundle_id = f'com.frontlinerewritten.{self.team.lower()}'
+
+
+def xcode_teams() -> List[dict]:
+    """The teams of the Apple IDs signed in to Xcode (Settings > Accounts)."""
+    exported = run(['defaults', 'export', 'com.apple.dt.Xcode', '-'])
+    try:
+        prefs = plistlib.loads(exported.stdout.encode()) if exported.returncode == 0 else {}
+    except Exception:
+        prefs = {}
+    teams = []
+    for account in prefs.get('IDEProvisioningTeamByIdentifier', {}).values():
+        for team in account:
+            if team.get('teamID') and all(t['id'] != team['teamID'] for t in teams):
+                teams.append({'id': team['teamID'], 'name': team.get('teamName', ''),
+                              'free': bool(team.get('isFreeProvisioningTeam'))})
+    return teams
+
+
+# The disc ------------------------------------------------------------------------------------------
+
+def decomp_setting(pattern: str, path: Path) -> str:
+    found = re.search(pattern, path.read_text(), re.MULTILINE)
+    if not found:
+        raise Failure('decomp-missing', f"Can't read {path.relative_to(ROOT)}.", 'git submodule update --init')
+    return found.group(1)
+
+
+def require_decomp() -> None:
+    if not (DECOMP / 'configure.py').is_file():
+        raise Failure('decomp-missing', 'The FrontlineDecompiled submodule is missing.',
+                      'git submodule update --init')
+
+
+def dtk(ctx: Context) -> Path:
+    """decomp-toolkit, at the version the decomp builds with, downloaded once."""
+    require_decomp()
+    tag = decomp_setting(r'config\.dtk_tag\s*=\s*"([^"]+)"', DECOMP / 'configure.py')
+    tool = ctx.work / 'tools' / f'dtk-{tag}'
+    if not tool.is_file():
+        tool.parent.mkdir(parents=True, exist_ok=True)
+        if stream([sys.executable, '-I', DECOMP / 'tools/download_tool.py', 'dtk', tool, '--tag', tag]) != 0:
+            raise Failure('download-failed', f"Couldn't download decomp-toolkit {tag} from GitHub.",
+                          'Check the internet connection and try again.')
+        tool.chmod(0o755)
+    return tool
+
+
+def source_of(ctx: Context) -> Path:
+    if not ctx.disc:
+        raise Failure('disc-missing', 'No disc given.', 'Pass --disc with your disc image or extracted disc folder.')
+    source = Path(ctx.disc).expanduser().resolve()
+    if not source.exists():
+        raise Failure('disc-missing', f'{source} does not exist.')
+    if source.is_file() and source.suffix.lower() not in IMAGE_TYPES:
+        raise Failure('disc-unsupported', f'{source.name} is not a disc image this tool reads.',
+                      f"Use one of: {', '.join(sorted(t[1:].upper() for t in IMAGE_TYPES))}, or an extracted disc folder.")
+    return source
+
+
+def image_info(tool: Path, image: Path) -> dict:
+    out = run([tool, 'disc', 'info', image])
+    text = out.stdout + out.stderr
+    game = re.search(r'Game ID:\s*(\S+)', text)
+    if out.returncode != 0 or not game:
+        raise Failure('disc-unreadable', f"{image.name} isn't a disc image dtk can read.",
+                      'Make the image again from your own disc.')
+    title = re.search(r'Title:\s*(.+)', text)
+    revision = re.search(r'Revision\s+(\d+)', text)
+    return {'gameId': game.group(1), 'title': title.group(1).strip() if title else '',
+            'revision': int(revision.group(1)) if revision else None}
+
+
+def folder_info(folder: Path) -> dict:
+    boot = folder / 'sys' / 'boot.bin'
+    if not boot.is_file() or not (folder / 'files').is_dir():
+        raise Failure('disc-unreadable', f"{folder} isn't an extracted disc: it needs sys/boot.bin and files/.",
+                      "In Dolphin: the game's Properties > Filesystem > Extract Entire Disc.")
+    header = boot.read_bytes()[:0x60]
+    return {'gameId': header[:6].decode('ascii', 'replace'),
+            'title': header[0x20:0x60].split(b'\0')[0].decode('ascii', 'replace'),
+            'revision': header[7]}
+
+
+def check_game(info: dict) -> None:
+    if info['gameId'] != GAME_ID:
+        raise Failure('wrong-game', f"This disc is {info['gameId']} ({info['title']}), not Medal of Honor: Frontline.",
+                      'The port needs the USA release, GMFE69.')
+
+
+def disc_info(ctx: Context, source: Path) -> dict:
+    return folder_info(source) if source.is_dir() else image_info(dtk(ctx), source)
+
+
+def stamp_of(source: Path) -> dict:
+    probe = source / 'sys' / 'boot.bin' if source.is_dir() else source
+    status = probe.stat()
+    return {'source': str(source), 'size': status.st_size, 'mtime': int(status.st_mtime)}
+
+
+def prepare(ctx: Context) -> dict:
+    """Reads the disc into the work folder. Does nothing when the same disc was prepared before."""
+    record_path = ctx.work / 'prepared.json'
+    source = source_of(ctx)
+    try:
+        record = json.loads(record_path.read_text())
+    except (OSError, ValueError):
+        record = None
+    if (record and record.get('stamp') == stamp_of(source) and Path(record['disc'], 'sys/boot.bin').is_file()
+            and Path(record['include'], 'game/Moh2_InternalFont.inc').is_file()):
+        emit('note', message='The disc is already prepared.')
+        return record
+
+    stage('tools', 'Getting the disc tools')
+    tool = dtk(ctx)
+
+    stage('disc', 'Reading your disc')
+    info = disc_info(ctx, source)
+    check_game(info)
+    if source.is_dir():
+        disc = source
+    else:
+        disc = ctx.work / 'disc'
+        partial = ctx.work / 'disc.partial'
+        shutil.rmtree(partial, ignore_errors=True)
+        if stream([tool, 'disc', 'extract', '-q', source, partial]) != 0:
+            raise Failure('disc-unreadable', f"Couldn't extract {source.name}.", 'Make the image again from your own disc.')
+        shutil.rmtree(disc, ignore_errors=True)
+        partial.rename(disc)
+    check_game(folder_info(disc))
+    elf = disc / 'files' / 'Moh2RelGC.elf'
+    if not elf.is_file():
+        raise Failure('wrong-version', "The disc has no files/Moh2RelGC.elf, so it isn't the release the port is made from.")
+
+    stage('executable', "Checking the game's version")
+    config = DECOMP / 'config' / GAME_ID / 'config.yml'
+    wanted = decomp_setting(r'^hash:\s*([0-9a-f]{40})', config)
+    split = ctx.work / 'split'
+    shutil.rmtree(split, ignore_errors=True)
+    (split / 'orig' / GAME_ID).mkdir(parents=True)
+    dol = split / 'orig' / GAME_ID / 'Moh2RelGC.dol'
+    if stream([tool, 'elf2dol', elf, dol]) != 0:
+        raise Failure('wrong-version', "Couldn't convert the game's executable.")
+    got = hashlib.sha1(dol.read_bytes()).hexdigest()
+    if got != wanted:
+        raise Failure('wrong-version', f"Your disc's game is a different version (its executable's SHA-1 is {got}).",
+                      'The port needs Medal of Honor: Frontline, USA (GMFE69), revision 0.')
+
+    stage('extract', 'Extracting the font and memory card icon')
+    # dtk reads config.yml's paths from its working folder: the DOL here, the decomp's config beside it.
+    (split / 'config').symlink_to(DECOMP / 'config', target_is_directory=True)
+    if stream([tool, '-C', split, 'dol', 'split', '--no-update', f'config/{GAME_ID}/config.yml', 'out']) != 0:
+        raise Failure('extract-failed', "Couldn't extract the pieces of the executable the build needs.")
+    include = ctx.work / 'include'
+    shutil.rmtree(include, ignore_errors=True)
+    (split / 'out' / 'include').rename(include)
+    shutil.rmtree(split)
+    if not (include / 'game' / 'Moh2_InternalFont.inc').is_file():
+        raise Failure('extract-failed', "The extracted pieces are missing the game's font.")
+
+    record = {'stamp': stamp_of(source), 'disc': str(disc), 'include': str(include),
+              'gameId': info['gameId'], 'revision': info['revision'], 'dolSha1': got}
+    record_path.write_text(json.dumps(record, indent=2) + '\n')
+    emit('prepared', disc=str(disc), include=str(include))
+    return record
+
+
+# The version -----------------------------------------------------------------------------------------
+
+def source_version() -> dict:
+    """The release being built, from git: the tag (v0.3.0 -> 0.3.0) when HEAD is one, else the last tag's
+    version (0.0.1 before the first), and the commit."""
+    commit = run(['git', '-C', ROOT, 'rev-parse', '--short', 'HEAD'])
+    described = run(['git', '-C', ROOT, 'describe', '--tags', '--abbrev=0'])
+    tag = described.stdout.strip() if described.returncode == 0 else ''
+    found = re.fullmatch(r'v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)', tag)
+    return {'version': found.group(1) if found else '0.0.1',
+            'commit': commit.stdout.strip() if commit.returncode == 0 else ''}
+
+
+# Check ---------------------------------------------------------------------------------------------
+
+def version_of(text: str) -> tuple:
+    found = re.search(r'(\d+)\.(\d+)', text)
+    return (int(found.group(1)), int(found.group(2))) if found else (0, 0)
+
+
+def cmd_check(ctx: Context) -> int:
+    results = []
+
+    def check(name: str, label: str, ok: bool, detail: str, fix: str = '') -> None:
+        results.append(ok)
+        emit('check', id=name, label=label, ok=bool(ok), detail=detail, fix='' if ok else fix)
+
+    check('mac', 'Apple silicon Mac', platform.machine() == 'arm64', platform.machine(),
+          'The game is built for arm64 only.')
+
+    xcode = run(['xcodebuild', '-version']) if shutil.which('xcodebuild') else None
+    xcode_line = xcode.stdout.splitlines()[0] if xcode and xcode.returncode == 0 and xcode.stdout else ''
+    check('xcode', 'Xcode 27 or later', version_of(xcode_line) >= MIN_XCODE, xcode_line or 'not found',
+          'Install Xcode from the App Store, open it once, then: sudo xcode-select -s /Applications/Xcode.app')
+
+    sdks = run(['xcodebuild', '-showsdks', '-json']) if xcode_line else None
+    found = [s['canonicalName'] for s in json.loads(sdks.stdout or '[]')
+             if s.get('platform') == ctx.p['sdk']] if sdks and sdks.returncode == 0 else []
+    if ctx.platform != 'macos':
+        check(f"{ctx.platform}-platform", f"The {ctx.p['name']} platform", bool(found),
+              found[-1] if found else 'not installed',
+              f"Xcode > Settings > Components, or: xcodebuild -downloadPlatform {ctx.p['name']}")
+
+    cmake = run(['cmake', '--version']) if shutil.which('cmake') else None
+    cmake_line = cmake.stdout.splitlines()[0] if cmake and cmake.returncode == 0 else ''
+    check('cmake', 'CMake 3.31 or later', version_of(cmake_line) >= MIN_CMAKE, cmake_line or 'not found',
+          'Download CMake from cmake.org and drag CMake.app to Applications, or: brew install cmake')
+
+    check('submodule', 'The decomp submodule', (DECOMP / 'configure.py').is_file(),
+          'present' if (DECOMP / 'configure.py').is_file() else 'missing', 'git submodule update --init')
+
+    teams = xcode_teams() if ctx.platform != 'macos' else []
+    paid = [t for t in teams if not t['free']]
+    if ctx.platform == 'macos':
+        pass  # signed ad hoc: no team needed
+    elif ctx.team:
+        known = next((t for t in teams if t['id'] == ctx.team), None)
+        ok = bool(known) and not known['free']
+        detail = (f"{known['name']} ({known['id']})" + (', a free personal team' if known['free'] else '')
+                  if known else f'{ctx.team} is not signed in to Xcode')
+    else:
+        ok = bool(paid)
+        detail = f"{paid[0]['name']} ({paid[0]['id']})" if paid else ('only free personal teams' if teams else 'no Apple ID')
+    if ctx.platform != 'macos':
+        check('account', 'A paid Apple Developer team in Xcode', ok, detail,
+              'Sign in under Xcode > Settings > Accounts. An app signed by a free personal team stops opening after 7 days, so the port needs a paid membership.')
+
+    if ctx.disc:
+        try:
+            source = source_of(ctx)
+            info = disc_info(ctx, source)
+            check_game(info)
+            revision = info['revision']
+            ok = revision in (0, None)
+            check('disc', 'Your disc', ok, f"{info['title']} ({info['gameId']}, revision {revision})",
+                  'The port needs revision 0 of the USA release.')
+        except Failure as failure:
+            check('disc', 'Your disc', False, failure.message, failure.fix)
+
+    return 0 if all(results) else 1
+
+
+# Build ---------------------------------------------------------------------------------------------
+
+# What a failed build said, and what to tell the user. The first that matches wins.
+KNOWN_FAILURES = [
+    (r'[Pp]ersonal development teams?.*(?:do not|does not|don\'t) support',
+     'paid-account-required', "A free personal team can't sign this app.",
+     'Use a paid Apple Developer team.'),
+    (r'No Accounts?\b|No Account for Team|not signed in',
+     'xcode-account', "Xcode isn't signed in to the team's Apple ID.", 'Sign in under Xcode > Settings > Accounts.'),
+    (r'has no devices|no devices from which',
+     'no-devices', 'The team has no Apple TV registered.',
+     "Pair the Apple TV in Xcode's Devices window, and pass --device with it switched on and awake."),
+    (r'(?:App ID|identifier).*(?:is not available|cannot be registered|already in use)',
+     'bundle-id-taken', 'The bundle ID {bundle} belongs to another team.', 'Pass a different --bundle-id.'),
+    (r'[Nn]o (?:signing certificate|certificate)',
+     'certificate', 'No development certificate for the team is on this Mac.',
+     'Xcode > Settings > Accounts: select the team, Manage Certificates, and add an Apple Development certificate.'),
+    (r'No profiles? for',
+     'no-profile', "Xcode couldn't make a provisioning profile for the app.",
+     "Check the team in Xcode > Settings > Accounts, and that the Apple TV is paired."),
+    (r"isn't an extracted disc|not GMFE69",
+     'disc-unreadable', "The prepared disc isn't usable.", 'Run: tools/tvos/port clean, then build again.'),
+]
+
+
+def explain(lines: List[str], ctx: Context) -> Failure:
+    errors = [line for line in lines if re.search(r'\berror\b', line, re.IGNORECASE)] or lines[-20:]
+    text = '\n'.join(errors)
+    for pattern, code, message, fix in KNOWN_FAILURES:
+        if re.search(pattern, text):
+            return Failure(code, message.format(bundle=ctx.bundle_id), fix.format(bundle=ctx.bundle_id))
+    first = next((line.strip() for line in errors if line.strip()), 'the build failed')
+    return Failure('build-failed', first[:400], 'The full log is above.')
+
+
+def profile_of(app: Path) -> dict:
+    decoded = run(['security', 'cms', '-D', '-i', app / 'embedded.mobileprovision'])
+    if decoded.returncode != 0:
+        return {}
+    try:
+        return plistlib.loads(decoded.stdout.encode())
+    except Exception:
+        return {}
+
+
+def cmd_build(ctx: Context) -> int:
+    require_decomp()
+    mac = ctx.platform == 'macos'
+    if not mac:
+        ctx.signing()
+    prepared = prepare(ctx)
+
+    stage('configure', 'Setting up the Xcode project')
+    project = ctx.work / ctx.p['project']
+    target = ctx.p['target']
+    stamp = source_version()
+    configure = ['cmake', '--preset', ctx.p['preset'], '-B', project,
+                 f"-DFRONTLINE_EXTRACTED_DIR={prepared['include']}",
+                 f"-DFRONTLINE_VERSION={stamp['version']}", f"-DFRONTLINE_COMMIT={stamp['commit']}"]
+    if not mac:
+        configure += [f'-DFRONTLINE_DEVELOPMENT_TEAM={ctx.team}',
+                      f'-DFRONTLINE_TV_BUNDLE_ID={ctx.bundle_id}',
+                      '-DFRONTLINE_DISC_IN_BUNDLE=ON',
+                      f"-DFRONTLINE_DISC_DIR={prepared['disc']}"]
+    lines: List[str] = []
+    if stream(configure, cwd=ROOT, on_line=lines.append) != 0:
+        raise explain(lines, ctx)
+
+    stage('compile', 'Compiling the game')
+    stats_path = ctx.work / ('build-stats.json' if ctx.platform == 'tvos' else f'build-stats-{ctx.platform}.json')
+    try:
+        expected = json.loads(stats_path.read_text()).get('steps', 0)
+    except (OSError, ValueError):
+        expected = 0
+    state = {'steps': 0, 'stage': 'compile'}
+    lines = []
+
+    def on_line(line: str) -> None:
+        lines.append(line)
+        if len(lines) > 4000:
+            del lines[:2000]
+        if re.match(r'(CompileC|SwiftCompile|CompileSwift|Ld|Libtool) ', line):
+            state['steps'] += 1
+            if expected and state['steps'] % 10 == 0:
+                emit('progress', fraction=round(min(state['steps'] / expected, 0.99), 3))
+        # embed_disc.sh runs in the app's CMake PostBuild phase, which Xcode names but doesn't echo.
+        if (not mac and line.startswith('PhaseScriptExecution CMake\\ PostBuild\\ Rules')
+                and f"target '{target}'" in line and state['stage'] == 'compile'):
+            state['stage'] = 'embed'
+            stage('embed', 'Copying your disc into the app')
+        # Xcode's line: CodeSign <path>.app (in target '<target>' from project '...')
+        if line.startswith('CodeSign ') and state['stage'] != 'sign' and f"target '{target}'" in line:
+            state['stage'] = 'sign'
+            stage('sign', 'Signing the app')
+
+    build = ['cmake', '--build', project, '--config', CONFIGURATION, '--target', target]
+    if not mac:
+        build += ['--', '-sdk', ctx.p['sdk'], '-allowProvisioningUpdates', '-allowProvisioningDeviceRegistration']
+    if stream(build, cwd=ROOT, on_line=on_line) != 0:
+        raise explain(lines, ctx)
+    if state['steps']:
+        stats_path.write_text(json.dumps({'steps': state['steps']}) + '\n')
+
+    if mac:
+        app = project / 'apps' / 'macos' / CONFIGURATION / MAC_APP
+        if not (app / 'Contents' / 'Frameworks' / 'FrontlineGame.so').is_file():
+            raise Failure('not-built', "The build finished, but the app is missing the game image.", 'Build again.')
+        result = {'app': str(app), 'disc': prepared['disc'], **stamp,
+                  'sizeBytes': sum(f.stat().st_size for f in app.rglob('*') if f.is_file())}
+        (ctx.work / ctx.p['result']).write_text(json.dumps(result, indent=2) + '\n')
+        emit('result', **result)
+        return 0
+    app = project / 'apps' / 'ios' / f"{CONFIGURATION}-{ctx.p['sdk']}" / f'{target}.app'
+    if not (app / 'embedded.mobileprovision').is_file():
+        raise Failure('not-signed', "The build finished, but the app isn't signed for a device.",
+                      'Check the team in Xcode > Settings > Accounts.')
+    profile = profile_of(app)
+    expires = profile.get('ExpirationDate')
+    devices = profile.get('ProvisionedDevices') or []
+    if ctx.device and devices and ctx.device not in devices:
+        emit('warning', code='device-not-in-profile',
+             message=f"The {ctx.p['device']} {ctx.device} is not in the app's profile, so it will refuse the install.",
+             fix="Pair it in Xcode's Devices window with it awake, then build again.")
+    size = sum(f.stat().st_size for f in app.rglob('*') if f.is_file())
+    result = {'app': str(app), 'bundleId': ctx.bundle_id, 'team': ctx.team, 'sizeBytes': size, **stamp,
+              'expires': expires.replace(tzinfo=datetime.timezone.utc).isoformat() if expires else None,
+              'devices': devices}
+    (ctx.work / ctx.p['result']).write_text(json.dumps(result, indent=2) + '\n')
+    emit('result', **result)
+    return 0
+
+
+def cmd_prepare(ctx: Context) -> int:
+    prepare(ctx)
+    return 0
+
+
+def install_mac(ctx: Context, launch: bool) -> int:
+    """Copies the app into Applications (yours if the shared one isn't writable), and tells it where the
+    extracted disc is, unless it already knows a disc of its own."""
+    try:
+        result = json.loads((ctx.work / ctx.p['result']).read_text())
+    except (OSError, ValueError):
+        raise Failure('not-built', 'The app has not been built yet.', 'Run: tools/tvos/port build --platform macos')
+    stage('install', 'Copying the app to Applications')
+    run(['osascript', '-e', 'if application "Frontline Rewritten" is running then '
+                            'tell application "Frontline Rewritten" to quit'])
+    for folder in (Path('/Applications'), Path.home() / 'Applications'):
+        target = folder / MAC_APP
+        try:
+            folder.mkdir(exist_ok=True)
+            shutil.rmtree(target, ignore_errors=True)
+            if run(['ditto', result['app'], target]).returncode == 0:
+                break
+        except OSError:
+            continue
+    else:
+        raise Failure('install-failed', "Couldn't copy the app to Applications.", 'Check the disk has space.')
+    known = run(['defaults', 'read', MAC_BUNDLE_ID, 'disc'])
+    if known.returncode != 0 or not Path(known.stdout.strip(), 'sys', 'boot.bin').is_file():
+        run(['defaults', 'write', MAC_BUNDLE_ID, 'disc', result['disc']])
+        emit('note', message=f"The app will use the disc at {result['disc']}. Keep that folder, or choose another in the app.")
+    emit('installed', app=str(target))
+    if launch:
+        stage('launch', 'Starting it')
+        if run(['open', target]).returncode != 0:
+            raise Failure('launch-failed', "The app is installed but didn't start.", f'Open it from {folder}.')
+    return 0
+
+
+def cmd_install(ctx: Context, launch: bool) -> int:
+    if ctx.platform == 'macos':
+        return install_mac(ctx, launch)
+    if not ctx.device:
+        raise Failure('device-missing', f"No {ctx.p['device']} given.", 'Pass --device (xcrun devicectl list devices).')
+    try:
+        result = json.loads((ctx.work / ctx.p['result']).read_text())
+    except (OSError, ValueError):
+        raise Failure('not-built', 'The app has not been built yet.', 'Run: tools/tvos/port build')
+    stage('install', f"Installing on the {ctx.p['device']} (about 1.4 GB, a few minutes)")
+    if stream(['xcrun', 'devicectl', 'device', 'install', 'app', '--device', ctx.device, result['app']]) != 0:
+        raise Failure('install-failed', f"The {ctx.p['device']} didn't take the app.",
+                      "Wake it up, check it's paired in Xcode's Devices window, and try again.")
+    if launch:
+        stage('launch', 'Starting it')
+        run(['xcrun', 'devicectl', 'device', 'process', 'terminate', '--device', ctx.device,
+             '--bundle-identifier', result['bundleId']])
+        if stream(['xcrun', 'devicectl', 'device', 'process', 'launch', '--device', ctx.device, result['bundleId']]) != 0:
+            raise Failure('launch-failed', "The app is installed but didn't start.",
+                          f"Wake the {ctx.p['device']} and open it from the Home screen.")
+    return 0
+
+
+def cmd_installed(ctx: Context) -> int:
+    """Emits 'installed' with what's on the Mac (Applications) or on --device: present, version, build."""
+    if ctx.platform == 'macos':
+        for folder in (Path('/Applications'), Path.home() / 'Applications'):
+            plist = folder / MAC_APP / 'Contents' / 'Info.plist'
+            if plist.is_file():
+                info = plistlib.loads(plist.read_bytes())
+                emit('installed', present=True, app=str(plist.parent.parent), version=info.get('FrontlineVersion')
+                     or info.get('CFBundleShortVersionString'), build=info.get('CFBundleVersion'),
+                     commit=info.get('FrontlineCommit', ''))
+                return 0
+        emit('installed', present=False)
+        return 0
+    if not ctx.device:
+        raise Failure('device-missing', f"No {ctx.p['device']} given.", 'Pass --device (xcrun devicectl list devices).')
+    try:
+        bundle = json.loads((ctx.work / ctx.p['result']).read_text())['bundleId']
+    except (OSError, ValueError, KeyError):
+        ctx.signing()
+        bundle = ctx.bundle_id
+    out = ctx.work / f'apps-{ctx.device}.json'
+    listed = run(['xcrun', 'devicectl', 'device', 'info', 'apps', '--device', ctx.device,
+                  '--bundle-id', bundle, '--json-output', out])
+    try:
+        apps = json.loads(out.read_text())['result']['apps']
+    except (OSError, ValueError, KeyError):
+        raise Failure('device-unreachable', f"Couldn't ask the {ctx.p['device']} what's installed.",
+                      "Wake it up and check it's paired in Xcode's Devices window." + (
+                          f" ({listed.stderr.strip().splitlines()[-1]})" if listed.stderr.strip() else ''))
+    finally:
+        out.unlink(missing_ok=True)
+    found = next((a for a in apps if a.get('bundleIdentifier') == bundle), None)
+    if found:
+        emit('installed', present=True, bundleId=bundle, version=found.get('version'),
+             build=found.get('bundleVersion'))
+    else:
+        emit('installed', present=False, bundleId=bundle)
+    return 0
+
+
+def cmd_clean(ctx: Context) -> int:
+    # Only what this script makes: --work-dir may be a folder that holds other things. The downloaded
+    # dtk stays, so a clean build needs no network.
+    for name in ('xcode', 'xcode-ios', 'xcode-mac', 'disc', 'disc.partial', 'split', 'include'):
+        shutil.rmtree(ctx.work / name, ignore_errors=True)
+    for name in ('prepared.json', 'result.json', 'result-ios.json', 'result-mac.json', 'build-stats.json',
+                 'build-stats-ios.json', 'build-stats-macos.json'):
+        (ctx.work / name).unlink(missing_ok=True)
+    emit('note', message=f'Removed the build and the prepared disc from {ctx.work}.')
+    return 0
+
+
+def main() -> int:
+    global JSON
+    parser = argparse.ArgumentParser(description=__doc__.split('\n')[0])
+    parser.add_argument('command', choices=('check', 'prepare', 'build', 'install', 'installed', 'clean'))
+    parser.add_argument('--context')
+    parser.add_argument('--disc')
+    parser.add_argument('--team')
+    parser.add_argument('--bundle-id')
+    parser.add_argument('--device')
+    parser.add_argument('--platform', choices=tuple(PLATFORMS))
+    parser.add_argument('--work-dir')
+    parser.add_argument('--launch', action='store_true', help='install: start the app afterwards')
+    parser.add_argument('--json', action='store_true')
+    args = parser.parse_args()
+    JSON = args.json
+    try:
+        ctx = Context(args)
+        ctx.work.mkdir(parents=True, exist_ok=True)
+        if args.command == 'check':
+            return cmd_check(ctx)
+        if args.command == 'prepare':
+            return cmd_prepare(ctx)
+        if args.command == 'build':
+            return cmd_build(ctx)
+        if args.command == 'install':
+            return cmd_install(ctx, args.launch)
+        if args.command == 'installed':
+            return cmd_installed(ctx)
+        return cmd_clean(ctx)
+    except Failure as failure:
+        emit('error', code=failure.code, message=failure.message, fix=failure.fix)
+        return 1
+    except KeyboardInterrupt:
+        emit('error', code='cancelled', message='Cancelled.')
+        return 130
+
+
+if __name__ == '__main__':
+    sys.exit(main())

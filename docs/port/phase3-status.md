@@ -2,19 +2,20 @@
 
 Hand-maintained. Phase 3 is the Apple TV port ([ROADMAP](../../ROADMAP.md#phase-3--iphone-ipad-and-apple-tv-m)).
 
-**Complete (2026-11-02), by the user's decision:**
-- The game runs and plays on Guest Room, an A15 Apple TV 4K: a level played through, saves going to iCloud.
+**Complete (2026-11-02), by the user's decision.** iPhone and iPad followed on 2026-11-21: [ios-status.md](ios-status.md).
+
+**iCloud removed (2026-11-21, the user's decision).** Saves stay on the device in every app. On tvOS the card stays in Caches, with a copy in the user defaults that's put back if Caches is emptied (`apps/ios/Sources/CardBackup.swift`). `SaveSync.swift`, the bindings' key-value mirror, the iCloud entitlements (the tvOS app now has none) and the `FrontlineICloudContainer` key are gone. T6 below is kept as the record of what was there. The App ID's iCloud capability is now unused; it can be turned off on developer.apple.com, or left on.
+
+**What was done:**
+- The game runs and plays on Guest Room, an A15 Apple TV 4K: a level played through, saves going to iCloud (until 2026-11-21; now local).
 - T7's measurement was closed without a run, since the game runs well as it is and newer Apple TVs will run it faster.
 - The install steps are in the [README](../../README.md#apple-tv).
 
 **Open items**, none needed for the port:
 - **T7 measurement:** the `FRONTLINE_PERF` run (below) is kept, should Rewritten's tvOS defaults, MetalFX "4K (upscaled)" or a precompiled `.metallib` ever be wanted.
-- **The rest of the T4 and T6 checklists:**
-  - T4: split screen, a second controller kind, rumble, the Mac's controller sheet.
-  - T6: restore after a reinstall, delete, offline.
+- **The rest of the T4 checklist:** split screen, a second controller kind, rumble, the Mac's controller sheet. (T6's is moot since iCloud's removal; the card backup's checklist is in [ios-status.md](ios-status.md).)
 - **The controller screen during play** on the TV, and **keyboard and mouse on tvOS** (T4 deviations).
-- **The Mac on iCloud:** it keeps its Application Support card. Sharing the container needs its bundle ID moved to `com.vanillacoffeesoft.FrontlineRewritten`, with a migration of its UserDefaults.
-- **iPhone and iPad:** the shell is shared and ready for them; touch controls and importing the disc through Files are the roadmap's plan.
+- **iPhone and iPad:** built 2026-11-21 ([ios-status.md](ios-status.md)).
 
 **The plan (approved 2026-11-02):**
 - One shared SwiftUI/UIKit shell (`apps/shared`, `apps/ios`). Only tvOS is finished this phase.
@@ -397,6 +398,8 @@ Build and install as in the T5 device checklist.
 
 ## T6: iCloud saves
 
+**Removed (2026-11-21).** Everything below is the record of the iCloud version; none of it is in the app any more.
+
 **Built (2026-11-02). Testing stop: the user runs the checklist below.**
 
 **Platform hook:** `frontline::SetCardChangeCallback` (`card.cpp`, bridged as `FrontlineSetCardChangeCallback`) reports each card change on the game thread:
@@ -517,3 +520,41 @@ Leave draw distance and the other options at their defaults. Note the TV's resol
 ### Results
 
 Not run. The user closed T7 (2026-11-02): the game runs well on Guest Room as it is.
+
+## Version 1 polish (2026-11-14)
+
+The tvOS app, made ready for a first release.
+
+**The setup screen** (`apps/ios/Sources/SetupView.swift`):
+- Two columns, to use the TV's width. Play, the mode and the picture are on the left; the game, mods, controls and screen are on the right. Each column scrolls on its own.
+- The title sits fixed on a solid bar, since the lists showed through the navigation title as they scrolled.
+- A menu picker in a tvOS list shows only its value, so the settings' names were missing. A list setting is now a `ChoiceRow` (`apps/shared/ChoiceRow.swift`): its name on the left, its value on the right, and the choices in a menu. The controller screen uses it too. On the Mac, it's the plain picker it was.
+- The renderer's choices are "GX (original)" and "Modern" (no longer "in progress"). The Mac's setup screen says the same.
+
+**App icon** (`apps/ios/Assets.xcassets`): the user's layered tvOS icon (front, middle and back layers at 400×240, plus the 1280×768 App Store icon) and the Top Shelf images (1920×720 and wide 2320×720), as brand assets. The catalog is the target's `RESOURCE`, which is what has Xcode compile it into `Assets.car`; as a plain source it was left out. The set's 1024 iPhone/iPad icon wasn't brought in yet: it's also named AppIcon, and belongs with the iPhone and iPad phase.
+
+**Exit Game:** "B EXIT GAME" on the game's main menu, under BROWSE and SELECT, in both modes. B there asks "Exit Game?" in a system dialog. Exit stops the game and shows the setup screen. Play then starts it again from a cold boot (the memory card check, the logos), with the settings as they are now.
+- **The game** (`game/native/exit_game.cpp`): the main menu is Master_Main (shell screen 0/0) as the active screen, with one of its five entries taking input. Its button hints are control 16, laid out a row apart, with SELECT at the bottom of the screen. So while the menu is up, the control moves up a row, and a copy of SELECT's row is drawn under it with the B button and "EXIT GAME". The screen file's layout is checked first; another version of the disc goes without the hint. The decomp's hooks: `NativeExitGameUpdate` (input.cpp), `NativeUiTransformBegin`/`End` (IStudioFuncs.cpp), `NativeExitGameOffered`/`NativeAtExitMenu` (native/hooks.h).
+- **The platform:** B pressed on the main menu (`PADRead`) sets a request the app takes (`TakeExitGameRequest`). `StopGame` has the game thread halt at its next input update (`NativeTakeInput`; `PADRead` runs in the retrace interrupt). The halt is the in-place reboot without starting main() again (`os/reboot.cpp`). While halted, interrupts are dropped: the retrace and audio clocks keep ticking, and nothing would take them. `StartGame` then clears the loader block (a cold boot) and resumes.
+- **Changed settings:** the GX backend made its EFB and pipelines once, for the first run's settings. On a restart with others (mode, resolution, widescreen, MSAA, renderer, smoke), `ForgetGxRunSettings` drops the EFB's textures, the particle buffer, the frame copies, and the pipelines and samplers, to be made again. The high frame rate's recorder isn't covered; no app offers Exit Game with it (the Mac doesn't offer Exit Game yet).
+- **The app:** while the dialog is up, UIKit gets the controllers, and the game gets no input. After it, the game gets none until everything is let go, so the press that answered the dialog doesn't reach the game too.
+- **Headless:** `FRONTLINE_EXIT_GAME=1` offers it and confirms at once, then starts the game again a second later. `FRONTLINE_EXIT_LINES`, `FRONTLINE_EXIT_MSAA`, `FRONTLINE_EXIT_MODE` and `FRONTLINE_EXIT_RENDERER` change the settings for the restart.
+
+**Checked headless:**
+- the hint on the main menu, and not on Options' screens or the Mission Log, which show GO BACK;
+- B in the Mission Log and Options goes back without asking;
+- B on the main menu stops the game (a halt takes about 1–2 ms), and the restart boots cold;
+- two exits in one run;
+- a restart at 720p without MSAA after 1080p with 4× MSAA;
+- a restart from Classic to Rewritten with the Modern renderer, into D-Day.
+
+### Checklist for the user (the simulator or Guest Room)
+
+1. The setup screen: two columns, every list setting showing its name and value, and the title staying put while the lists scroll.
+2. On the game's main menu: "B EXIT GAME" under SELECT, lined up with it, in Classic and in Rewritten.
+3. B there: the "Exit Game?" dialog. Cancel: back on the menu, and the press that chose Cancel doesn't select anything in the game.
+4. B again, then Exit Game: the setup screen.
+5. Change the mode or the resolution, then Play: the game boots from the start with the new settings, and plays a level.
+6. With the Siri Remote alone: Back on the main menu opens the dialog, and the remote works it.
+7. B in the Mission Log and Options: it still goes back, with no dialog.
+8. Your save is still there after an exit and a new Play.

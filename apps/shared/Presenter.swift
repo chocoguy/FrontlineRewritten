@@ -26,6 +26,11 @@ final class Presenter: NSObject, CAMetalDisplayLinkDelegate, @unchecked Sendable
         thread.start()
     }
 
+    /// Stops presenting (Exit Game); the display thread ends.
+    func stop() {
+        link.invalidate()
+    }
+
     func setRange(_ range: CAFrameRateRange) {
         pendingRange.withLock { $0 = range }
     }
