@@ -8,4 +8,4 @@ target_link_libraries(frontline_datacheck PRIVATE frontline_platform)
 # Same environment as the game code, since it includes game headers.
 target_compile_options(frontline_datacheck PRIVATE
     -fno-strict-aliasing -fsigned-char
-    "SHELL:-include ${PROJECT_SOURCE_DIR}/platform/include/msl_compat.h")
+    "SHELL:-include \"${PROJECT_SOURCE_DIR}/platform/include/msl_compat.h\"")

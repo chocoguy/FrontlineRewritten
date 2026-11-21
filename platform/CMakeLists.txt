@@ -42,7 +42,7 @@ target_include_directories(frontline_platform PUBLIC include)
 # (Not for Swift, whose compiler doesn't take the flag; the app's Swift reaches
 # the game only through its bridging header.)
 target_compile_options(frontline_platform PUBLIC
-    "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:SHELL:-idirafter ${FRONTLINE_DECOMP_DIR}/include>")
+    "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:SHELL:-idirafter \"${FRONTLINE_DECOMP_DIR}/include\">")
 
 target_compile_features(frontline_platform PUBLIC cxx_std_20)
 target_compile_definitions(frontline_platform PUBLIC "$<$<COMPILE_LANGUAGE:C,CXX,OBJCXX>:FRONTLINE_NATIVE=1>")

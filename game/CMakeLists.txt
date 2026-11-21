@@ -97,11 +97,12 @@ target_compile_definitions(frontline_game PRIVATE
 # The game's MSL headers (string.h, math.h, ...) live at the root of the
 # decomp's include/ folder. -idirafter puts that folder after the SDK, so the
 # real C library wins and the game's own headers (game/, ea/, dolphin/, ...)
-# are still found.
+# are still found. The paths are quoted: the installer builds under
+# "Application Support/Frontline Rewritten Installer", and SHELL: splits at spaces.
 target_compile_options(frontline_game PRIVATE
-    "SHELL:-include ${PROJECT_SOURCE_DIR}/platform/include/msl_compat.h"
-    "SHELL:-idirafter ${_decomp}/include"
-    "SHELL:-idirafter ${_extracted}"
+    "SHELL:-include \"${PROJECT_SOURCE_DIR}/platform/include/msl_compat.h\""
+    "SHELL:-idirafter \"${_decomp}/include\""
+    "SHELL:-idirafter \"${_extracted}\""
     # See docs/architecture/0004-compiler-rules.md.
     -fno-strict-aliasing
     -fwrapv
