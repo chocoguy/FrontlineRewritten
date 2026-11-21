@@ -447,6 +447,25 @@ def profile_of(app: Path) -> dict:
         return {}
 
 
+def hardware_udid(device: str) -> str:
+    """The UDID a provisioning profile lists for `device`, which may be devicectl's own identifier (they
+    differ), its name or the UDID itself. Empty if devicectl doesn't know it."""
+    out = Path(os.environ.get('TMPDIR', '/tmp')) / f'frontline-devices-{os.getpid()}.json'
+    run(['xcrun', 'devicectl', 'list', 'devices', '--json-output', out])
+    try:
+        entries = json.loads(out.read_text())['result']['devices']
+    except (OSError, ValueError, KeyError):
+        entries = []
+    finally:
+        out.unlink(missing_ok=True)
+    for entry in entries:
+        hardware = entry.get('hardwareProperties', {})
+        names = {entry.get('identifier'), hardware.get('udid'), entry.get('deviceProperties', {}).get('name')}
+        if device in names:
+            return hardware.get('udid', '')
+    return ''
+
+
 def cmd_build(ctx: Context) -> int:
     require_decomp()
     mac = ctx.platform == 'macos'
@@ -521,7 +540,8 @@ def cmd_build(ctx: Context) -> int:
     profile = profile_of(app)
     expires = profile.get('ExpirationDate')
     devices = profile.get('ProvisionedDevices') or []
-    if ctx.device and devices and ctx.device not in devices:
+    udid = hardware_udid(ctx.device) if ctx.device and devices else ''
+    if udid and udid not in devices:
         emit('warning', code='device-not-in-profile',
              message=f"The {ctx.p['device']} {ctx.device} is not in the app's profile, so it will refuse the install.",
              fix="Pair it in Xcode's Devices window with it awake, then build again.")

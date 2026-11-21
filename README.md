@@ -52,7 +52,7 @@ Let's try the **Frontline Installer!** It's a simple app that takes your legally
 
 **Updates:** when a new version is released, **Updates** shows it with its notes. **Update All** rebuilds it once and reinstalls it everywhere you installed the game. A device that's off is finished later. The installer updates itself too (Frontline Installer → Check for Updates…).
 
-**Before an install expires:** iPhone, iPad and Apple TV installs stop opening when their profile expires, after up to a year. The installer reminds you 14 and 3 days before; press **Reinstall**. Your saves are kept.
+**Before an install expires:** iPhone, iPad and Apple TV installs stop opening when their profile expires, after up to a year. The Game screen shows when each one stops working; press **Reinstall** before then. Your saves are kept.
 
 Everything the installer downloads and builds stays in `~/Library/Application Support/Frontline Rewritten Installer`. It runs `tools/tvos/port`, which also works from the Terminal (below).
 

@@ -28,7 +28,6 @@ set(_sources
     Sources/InstallerApp.swift
     Sources/PortEvent.swift
     Sources/Releases.swift
-    Sources/Reminders.swift
     Sources/SemVer.swift
     Sources/Shell.swift
     Sources/Source.swift
@@ -66,5 +65,4 @@ endif()
 target_link_libraries(FrontlineInstaller PRIVATE
     "${sparkle_SOURCE_DIR}/Sparkle.framework"
     "-framework AppKit"
-    "-framework SwiftUI"
-    "-framework UserNotifications")
+    "-framework SwiftUI")

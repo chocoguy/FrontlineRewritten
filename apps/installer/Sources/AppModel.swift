@@ -172,7 +172,7 @@ final class AppModel: ObservableObject {
         let install = Install(platform: platform, deviceId: device?.id, deviceName: device?.name ?? "This Mac")
         run("Installing on \(install.deviceName)") {
             try await self.bringSource(to: tag)
-            try await self.build(tag: tag, targets: [install], launch: true)
+            try await self.build(tag: tag, targets: [install])
         }
     }
 
@@ -182,7 +182,7 @@ final class AppModel: ObservableObject {
         }
         run("Reinstalling on \(install.deviceName)") {
             try await self.bringSource(to: tag)
-            try await self.build(tag: tag, targets: [install], launch: true)
+            try await self.build(tag: tag, targets: [install])
         }
     }
 
@@ -199,7 +199,7 @@ final class AppModel: ObservableObject {
         let targets = state.installs
         run(title ?? "Installing \(release.tag)") {
             try await self.bringSource(to: release.tag)
-            try await self.build(tag: release.tag, targets: targets, launch: false)
+            try await self.build(tag: release.tag, targets: targets)
         }
     }
 
@@ -210,12 +210,11 @@ final class AppModel: ObservableObject {
         let targets = pending
         run("Finishing the update") {
             try await self.bringSource(to: tag)
-            try await self.build(tag: tag, targets: targets, launch: false)
+            try await self.build(tag: tag, targets: targets)
         }
     }
 
     func forget(_ install: Install) {
-        Reminders.cancel(for: install)
         state.installs.removeAll { $0.id == install.id }
         reported[install.id] = nil
     }
@@ -461,9 +460,9 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Builds `tag` once per platform, then installs it on each target. A device that can't be
-    /// reached is marked pending, and the others go on.
-    private func build(tag: String, targets: [Install], launch: Bool) async throws {
+    /// Builds `tag` once per platform, then installs it on each target, without opening it. A device
+    /// that can't be reached is marked pending, and the others go on.
+    private func build(tag: String, targets: [Install]) async throws {
         var missed: [String] = []
         for platform in Platform.allCases {
             let mine = targets.filter { $0.platform == platform }
@@ -492,9 +491,6 @@ final class AppModel: ObservableObject {
                 if let device = target.deviceId {
                     arguments += ["--device", device]
                 }
-                if launch {
-                    arguments.append("--launch")
-                }
                 do {
                     try await port(arguments)
                 } catch let problem as Problem where platform != .macos && !activity.cancelled {
@@ -511,7 +507,6 @@ final class AppModel: ObservableObject {
                 install.pending = false
                 state.record(install)
                 reported[install.id] = version
-                await Reminders.schedule(for: install)
             }
         }
         let names = targets.map(\.deviceName).filter { !missed.contains($0) }

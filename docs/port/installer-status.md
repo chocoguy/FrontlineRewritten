@@ -48,10 +48,12 @@ Hand-maintained. The standalone installer: a signed, notarized download that bui
 - **CMake:** 3.31 or later, either Kitware's 4.5.1 that the installer downloads (checked against its SHA-256) or one already on the Mac.
 - **Optional:** the iOS and tvOS platforms (installed with `xcodebuild -downloadPlatform`), and a paid team in Xcode (read from Xcode's defaults, as the port script does).
 
-**R3: installs and reminders.**
+**R3: installs.**
 - `state.json` records each install's version, commit, install date, expiry and whether it's pending.
 - At launch, `port installed` checks what's really there.
-- `Reminders` schedules local notifications 14 and 3 days before a device's profile expires.
+- The Game screen shows each device's expiry date. There are no notifications (removed 2026-11-21 at the user's request).
+- The installer installs only; it never opens the app it installed (also 2026-11-21). An install used to end with `--launch`, and devicectl's launch could leave the job hanging at "Starting it".
+- **Fixed (2026-11-21):** the build warned that a device "is not in the app's profile" for every device. Profiles list hardware UDIDs, and `--device` is devicectl's identifier; the script now looks up the device's UDID (`hardware_udid`) before comparing.
 
 **R4: releases.**
 - Sparkle 2.10.1 comes from `FetchContent`, pinned by GitHub's SHA-256, and is embedded and code-signed on copy.
@@ -66,7 +68,6 @@ Hand-maintained. The standalone installer: a signed, notarized download that bui
 ## Open items
 - **The first release has to come from a source that has all this.** An installer can only build tags whose `tools/tvos/port` takes `--platform` and `--work-dir` and reports `installed`, which is every tag from the first release on.
 - **Sparkle's update UI** follows the user's choice in its first-run prompt; automatic checks are on by default.
-- **Reminders** can be checked only with a real device install, unless the expiry is temporarily shortened in a debug build.
 
 ## Checklist for the user
 
@@ -92,7 +93,7 @@ tools/release.sh 0.1.0-rc1 --prerelease
 **3. Fresh setup** (that account):
 - [ ] Setup lists what's missing. Download gets CMake; Install gets iOS support.
 - [ ] Choose the disc, then Install On… → This Mac. The source downloads, it builds, and Frontline Rewritten opens from Applications.
-- [ ] With the paid team signed in to Xcode: an iPhone, and Guest Room, each install and launch. The Game screen shows each one's version and when it stops working.
+- [ ] With the paid team signed in to Xcode: an iPhone, and Guest Room, each install (without opening). The Game screen shows each one's version and when it stops working.
 
 **4. Game update:**
 
@@ -116,5 +117,3 @@ tools/release.sh 0.1.2-rc1 --prerelease --min-app 0.1.2
 - [ ] Undo Mac Update puts the previous Mac version back.
 - [ ] Install Another Version → 0.1.0-rc1 reinstalls the older one everywhere.
 
-**7. Reminders:**
-- [ ] After a device install, System Settings → Notifications lists Frontline Installer. A debug build with a short expiry shows the reminder.
