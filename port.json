@@ -3,7 +3,7 @@
   "id": "frontline-rewritten",
   "name": "Frontline Rewritten",
   "game": "Medal of Honor: Frontline (GameCube, USA)",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "0.1.0",
 
   "entry": "tools/tvos/port",
