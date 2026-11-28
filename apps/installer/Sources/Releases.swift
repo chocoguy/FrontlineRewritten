@@ -32,6 +32,17 @@ enum Releases {
             .sorted { $0.version! > $1.version! }
     }
 
+    /// The installable releases this installer can build: the ones of its own major version. A new
+    /// major version is a new installer, downloaded by hand; minor and patch releases are game updates.
+    static func compatible(_ all: [Release], prereleases: Bool, installerMajor: Int) -> [Release] {
+        installable(all, prereleases: prereleases).filter { $0.version!.major == installerMajor }
+    }
+
+    /// The newest release that needs a newer installer (a later major version), if any.
+    static func needingNewerInstaller(_ all: [Release], prereleases: Bool, installerMajor: Int) -> Release? {
+        installable(all, prereleases: prereleases).first { $0.version!.major > installerMajor }
+    }
+
     static func parse(_ data: Data) throws -> [Release] {
         try JSONDecoder().decode([Release].self, from: data)
     }

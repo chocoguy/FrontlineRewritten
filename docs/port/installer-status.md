@@ -10,8 +10,18 @@ Hand-maintained. The standalone installer: a signed, notarized download that bui
 **The user's choices (2026-11-21):**
 - Updates come only from GitHub release tags.
 - Both repositories are public.
-- The installer updates itself with Sparkle.
+- ~~The installer updates itself with Sparkle.~~ Replaced 2026-11-27: the major version is the installer (below).
 - Releases are made by `tools/release.sh` on the user's Mac.
+
+## 2026-11-27: major version = installer (built, untested)
+
+Ported from GT3 Revisited's installer (the user's migration guide).
+- **No Sparkle.** `N.0.0` releases build, sign and notarize a new installer; `N.x.y` releases re-attach `vN.0.0`'s `FrontlineInstaller.zip` unchanged. An installer builds only its own major (`Releases.compatible`); a newer major shows an alert and a banner, and blocks game updates (Reinstall still works). `--min-app` is gone; `release.sh` sets `minAppVersion` to `N.0.0` only to stop the 1.x Sparkle installers.
+- **Transition:** the first release with this installer must be `2.0.0`. 1.x installers' Check for Updates… finds nothing; players download it by hand.
+- **Fixed:** Add/Reinstall built `state.tag` even after a failed first build pinned an old tag (`targetTag`); Updates with nothing installed now says to install from the Game screen.
+- **`tools/tvos/port build`:** passes `-DCMAKE_OSX_SYSROOT` (an `xcrun` shim exports the macOS `SDKROOT`), builds with `xcodebuild -scheme … -derivedDataPath <project>/DerivedData`, and removes the `CMAKE_TRY_COMPILE-*` folders configure leaves in the global DerivedData.
+- **Setup → Storage:** size, Show in Finder, Free Up Space (`work/xcode`, `xcode-ios`, `xcode-mac`), Remove Everything….
+- **Accent #8AA6EE** in the installer and the Mac game app; the Mac game app has the installer's icon (`apps/macos/AppIcon.icns`).
 
 ## What was built
 
@@ -56,8 +66,7 @@ Hand-maintained. The standalone installer: a signed, notarized download that bui
 - **Fixed (2026-11-21):** the build warned that a device "is not in the app's profile" for every device. Profiles list hardware UDIDs, and `--device` is devicectl's identifier; the script now looks up the device's UDID (`hardware_udid`) before comparing.
 
 **R4: releases.**
-- Sparkle 2.10.1 comes from `FetchContent`, pinned by GitHub's SHA-256, and is embedded and code-signed on copy.
-- The feed is `releases/latest/download/appcast.xml`. Builds without `FRONTLINE_SPARKLE_PUBLIC_KEY` never offer to update themselves.
+- (Sparkle was removed 2026-11-27, above.)
 - `tools/release.sh` and [docs/release.md](../release.md).
 
 **R5: cleanup.**
@@ -67,23 +76,21 @@ Hand-maintained. The standalone installer: a signed, notarized download that bui
 
 ## Open items
 - **The first release has to come from a source that has all this.** An installer can only build tags whose `tools/tvos/port` takes `--platform` and `--work-dir` and reports `installed`, which is every tag from the first release on.
-- **Sparkle's update UI** follows the user's choice in its first-run prompt; automatic checks are on by default.
 
 ## Checklist for the user
 
 **1. One-time setup** ([docs/release.md](../release.md)):
 - [ ] the Developer ID certificate
 - [ ] the `frontline-notary` profile
-- [ ] Sparkle keys: commit `apps/installer/sparkle-public-key.txt`, and back up the private key
 - [ ] `gh`
 
 **2. Release candidate:** commit this work, then:
 
 ```sh
-tools/release.sh 0.1.0-rc1 --prerelease
+tools/release.sh 2.0.0-rc1 --prerelease
 ```
 
-- [ ] It finishes and the GitHub release has the zip and `appcast.xml`.
+- [ ] It finishes and the GitHub release has `FrontlineInstaller.zip`.
 - [ ] On another macOS user account (System Settings → Users & Groups), download the zip from the release page, unzip it and open it: no Gatekeeper warning.
 - [ ] In that account, pre-releases are on:
   ```sh
@@ -98,22 +105,23 @@ tools/release.sh 0.1.0-rc1 --prerelease
 **4. Game update:**
 
 ```sh
-tools/release.sh 0.1.1-rc1 --prerelease
+tools/release.sh 2.0.1-rc1 --prerelease
 ```
 
-- [ ] Updates shows 0.1.1-rc1 with its notes. Update All builds once per platform and reinstalls every target.
+- [ ] The release has 2.0.0-rc1's installer zip, re-attached.
+- [ ] Updates shows 2.0.1-rc1 with its notes. Update All builds once per platform and reinstalls every target.
 - [ ] With the Apple TV turned off, it's marked pending. Finish the Update completes it later.
 
-**5. Installer update:**
+**5. New installer:**
 
 ```sh
-tools/release.sh 0.1.2-rc1 --prerelease --min-app 0.1.2
+tools/release.sh 3.0.0-rc1 --prerelease
 ```
 
-- [ ] Sparkle offers the new installer and relaunches it. (Sparkle reads `latest/download`, which skips pre-releases, so testing this step needs a full release, or the appcast URL pointed at the candidate's.)
-- [ ] An older installer told to update to 0.1.2 stops with "needs Frontline Installer 0.1.2 or later".
+- [ ] The 2.x installer shows "A new Frontline Installer is available" once, and a banner on Game and Updates. Update All and Install Another Version… are gone or disabled; Reinstall still works.
+- [ ] Setup → Storage shows the folder's size; Free Up Space shrinks it.
 
 **6. Rollback:**
 - [ ] Undo Mac Update puts the previous Mac version back.
-- [ ] Install Another Version → 0.1.0-rc1 reinstalls the older one everywhere.
+- [ ] Install Another Version → 2.0.0-rc1 reinstalls the older one everywhere.
 

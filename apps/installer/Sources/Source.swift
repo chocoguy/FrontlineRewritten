@@ -35,18 +35,6 @@ enum Source {
         ]
     }
 
-    /// The installer version `tag` needs (its port.json's minAppVersion), read from the fetched tag
-    /// before it's checked out. Nil if it doesn't say.
-    static func minimumInstaller(for tag: String, in workspace: Workspace) async -> SemVer? {
-        guard let text = await Shell.output(git, ["-C", workspace.source.path, "show", "tags/\(tag):port.json"]),
-              let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let minimum = json["minAppVersion"] as? String else {
-            return nil
-        }
-        return SemVer(minimum.split(separator: ".").count == 2 ? minimum + ".0" : minimum)
-    }
-
     /// git's progress lines ("Receiving objects:  45% (…)") as a fraction.
     static func progress(in line: String) -> Double? {
         guard line.contains("Receiving objects") || line.contains("Resolving deltas") || line.contains("Updating files"),

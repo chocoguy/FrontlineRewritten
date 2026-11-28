@@ -1,6 +1,12 @@
 import AppKit
 import SwiftUI
 
+extension Color {
+    /// The app's accent, #8AA6EE (also AccentColor in Assets.xcassets, for AppKit's own controls). Set
+    /// as a tint too: the asset alone gives way when the user picks a system accent color.
+    static let brand = Color(.sRGB, red: 0x8A / 255, green: 0xA6 / 255, blue: 0xEE / 255)
+}
+
 @main
 struct FrontlineApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
@@ -12,12 +18,14 @@ struct FrontlineApp: App {
             RootView()
                 .frame(minWidth: 640, minHeight: 480)
                 .background(.black)
+                .tint(.brand)
         }
         .defaultSize(width: 960, height: 720)
         .windowResizability(.contentMinSize)
 
         SwiftUI.Settings {
             SettingsView()
+                .tint(.brand)
         }
     }
 }

@@ -2,6 +2,12 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+extension Color {
+    /// The installer's accent, #8AA6EE (also AccentColor in Assets.xcassets, for AppKit's own controls).
+    /// Set as a tint too: the asset alone gives way when the user picks a system accent color.
+    static let brand = Color(.sRGB, red: 0x8A / 255, green: 0xA6 / 255, blue: 0xEE / 255)
+}
+
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
 
@@ -14,7 +20,7 @@ struct ContentView: View {
                 Label("Game", systemImage: "gamecontroller")
                     .tag(AppModel.Screen.game)
                 Label("Updates", systemImage: "arrow.down.circle")
-                    .badge(model.updateAvailable ? 1 : 0)
+                    .badge(model.updateAvailable || model.newInstaller != nil ? 1 : 0)
                     .tag(AppModel.Screen.updates)
                 Label {
                     Text("Activity")
@@ -43,6 +49,43 @@ struct ContentView: View {
             }
         }
         .frame(minWidth: 760, minHeight: 520)
+        .tint(.brand)
+        .alert("A new Frontline Installer is available", isPresented: $model.showNewInstaller) {
+            Button("Download") { model.openNewInstaller() }
+            Button("Later", role: .cancel) {}
+        } message: {
+            Text(newInstallerMessage)
+        }
+    }
+
+    private var newInstallerMessage: String {
+        let tag = model.newInstaller?.tag ?? "The latest release"
+        return "\(tag) needs a new installer, so game updates wait until you use it. Download it from GitHub " +
+            "and replace this one: your disc, your devices and the build carry over."
+    }
+}
+
+/// Says a release needs a new installer, with the way to get it.
+struct NewInstallerBanner: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let newer = model.newInstaller {
+            GroupBox {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "arrow.down.app.fill").font(.title2).foregroundStyle(.orange)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("A new installer is available").bold()
+                        Text("\(newer.tag) needs it. Game updates wait until you download it and open it instead of this one.")
+                            .font(.callout).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Button("Download…", action: model.openNewInstaller)
+                }
+                .padding(6)
+            }
+        }
     }
 }
 
@@ -87,6 +130,48 @@ struct SetupScreen: View {
                 }
             }
             DiscBox()
+            StorageBox()
+        }
+    }
+}
+
+/// The one folder the installer writes to, how big it is, and ways to shrink it.
+struct StorageBox: View {
+    @EnvironmentObject private var model: AppModel
+    @State private var confirmingRemoval = false
+
+    var body: some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Image(systemName: "internaldrive").font(.title)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(model.storageBytes.map { ByteCountFormatter.string(fromByteCount: $0, countStyle: .file) } ?? "Measuring…")
+                            .font(.headline)
+                        Text(model.workspace.root.path)
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    Button("Show in Finder", action: model.showStorage)
+                }
+                Text("Everything the installer makes is in this folder: the game's source, the Xcode projects and builds, CMake and the logs. Free Up Space removes the builds (the next install takes about 15 minutes longer). Remove Everything also forgets your disc and devices; the game stays on them.")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                HStack {
+                    Button("Free Up Space", action: model.freeUpSpace)
+                    Button("Remove Everything…") { confirmingRemoval = true }
+                }
+                .disabled(model.activity.running)
+            }
+            .padding(6)
+        } label: {
+            Text("Storage").font(.headline)
+        }
+        .confirmationDialog("Remove everything the installer made?", isPresented: $confirmingRemoval) {
+            Button("Remove Everything", role: .destructive, action: model.removeEverything)
+        } message: {
+            Text("This deletes \(model.workspace.root.path). The game stays on this Mac and your devices, and your disc isn't touched.")
         }
     }
 }
@@ -165,7 +250,10 @@ struct GameScreen: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Header(title: "Frontline Rewritten",
-                   subtitle: model.state.tag.map { "Version \($0) is built." } ?? "Not built yet. The first build takes about 15 minutes.")
+                   subtitle: model.state.installs.isEmpty || model.state.tag == nil
+                       ? "Not installed yet. The first build takes about 15 minutes."
+                       : "Version \(model.state.tag!) is installed.")
+            NewInstallerBanner()
             DiscBox()
             GroupBox {
                 VStack(alignment: .leading, spacing: 10) {
@@ -319,24 +407,11 @@ struct DevicePicker: View {
 
 struct UpdatesScreen: View {
     @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var updater: InstallerUpdater
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Header(title: "Updates", subtitle: "New versions come from the project's releases on GitHub.")
-            GroupBox {
-                HStack {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Frontline Installer \(model.installerVersion.description)").bold()
-                        if let needed = model.needsInstaller {
-                            Text("The latest game needs installer \(needed.description) or later.").foregroundStyle(.orange)
-                        }
-                    }
-                    Spacer()
-                    Button("Check for Updates…", action: updater.check).disabled(!updater.available)
-                }
-                .padding(8)
-            }
+            Header(title: "Updates", subtitle: "New versions of the game come from the project's releases on GitHub.")
+            NewInstallerBanner()
             GroupBox {
                 VStack(alignment: .leading, spacing: 12) {
                     if let error = model.releaseError {
@@ -349,9 +424,13 @@ struct UpdatesScreen: View {
                                 Text(status(latest)).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Button(model.state.installs.isEmpty ? "Nothing Installed Yet" : "Update All", action: model.updateAll)
-                                .buttonStyle(.borderedProminent)
-                                .disabled(!model.updateAvailable || !model.canRun)
+                            if model.state.installs.isEmpty {
+                                Button("Go to Game") { model.screen = .game }
+                            } else if model.updateAvailable {
+                                Button("Update All", action: model.updateAll)
+                                    .buttonStyle(.borderedProminent)
+                                    .disabled(!model.canRun)
+                            }
                         }
                         if let notes = latest.notes, !notes.isEmpty {
                             Divider()
@@ -374,19 +453,20 @@ struct UpdatesScreen: View {
                             }
                         }
                         .fixedSize()
-                        .disabled(model.installable.isEmpty || model.state.installs.isEmpty || !model.canRun)
+                        .disabled(model.installable.isEmpty || model.state.installs.isEmpty || model.newInstaller != nil || !model.canRun)
                     }
                 }
                 .padding(8)
-            } label: {
-                Text("The game").font(.headline)
             }
         }
     }
 
     private func status(_ latest: Release) -> String {
-        guard let tag = model.state.tag else {
-            return "The newest release. Install the game from the Game screen."
+        guard !model.state.installs.isEmpty, let tag = model.state.tag else {
+            return "The newest release. Install it on this Mac or a device from the Game screen."
+        }
+        if model.newInstaller != nil, latest.tag != tag {
+            return "You have \(tag). Updates wait for the new installer."
         }
         return model.updateAvailable ? "You have \(tag). Update All rebuilds it once and reinstalls it everywhere it's installed."
                                      : "You have the newest version."

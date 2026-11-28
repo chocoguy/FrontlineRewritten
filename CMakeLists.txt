@@ -82,8 +82,8 @@ if(FRONTLINE_BUILD_APP)
         add_subdirectory(apps/ios)
     else()
         add_subdirectory(apps/macos)
-        # Frontline Installer embeds Sparkle.framework, which only the Xcode generator does; its
-        # logic (no UI) is tested with any generator.
+        # Frontline Installer builds with the Xcode generator only (its asset catalog); its logic
+        # (no UI) is tested with any generator.
         set(FRONTLINE_INSTALLER_LOGIC_SOURCES
             "${CMAKE_CURRENT_SOURCE_DIR}/apps/installer/Sources/PortEvent.swift"
             "${CMAKE_CURRENT_SOURCE_DIR}/apps/installer/Sources/Releases.swift"

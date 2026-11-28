@@ -22,9 +22,9 @@
 	<string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
 	<key>CFBundleVersion</key>
 	<string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
-	<!-- The release (with any -rc suffix), which port.json's minAppVersion is compared with. -->
-	<key>FrontlineVersion</key>
-	<string>${FRONTLINE_VERSION}</string>
+	<!-- The release it was built for (with any -rc suffix): it builds the releases of this major version. -->
+	<key>FrontlineInstallerVersion</key>
+	<string>${FRONTLINE_INSTALLER_VERSION_FULL}</string>
 	<key>FrontlineCommit</key>
 	<string>${FRONTLINE_COMMIT}</string>
 	<key>LSApplicationCategoryType</key>
@@ -44,12 +44,5 @@
 	<string>The installer reads the disc image you choose to build the game.</string>
 	<key>NSRemovableVolumesUsageDescription</key>
 	<string>The installer reads the disc image you choose to build the game.</string>
-	<!-- Sparkle: the appcast attached to the latest GitHub release, signed with this key. -->
-	<key>SUFeedURL</key>
-	<string>https://github.com/chocoguy/FrontlineRewritten/releases/latest/download/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>${FRONTLINE_SPARKLE_PUBLIC_KEY}</string>
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
 </dict>
 </plist>

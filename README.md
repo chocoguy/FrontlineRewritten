@@ -40,21 +40,22 @@ Run Rewritten to play the game with many QOL updates updates include:
 
 Let's try the **Frontline Installer!** It's a simple app that takes your legally obtained disc image and builds the game from it: a .app for your Mac, or installed straight on your iPhone, iPad or Apple TV. It also keeps them up to date.
 
-1. **Download Frontline Installer** from the [latest release](https://github.com/chocoguy/FrontlineRewritten/releases/latest), unzip it, and drag it to Applications. It's signed and notarized.
-2. **Install Xcode 27** from the App Store and open it once. Xcode builds the game; you won't need to use it.
-3. **Open Frontline Installer and follow Setup.** It checks what this Mac needs and fixes what it can: it downloads CMake, and installs iOS or tvOS support in Xcode if you want those.
-4. **Choose your disc:** a disc image of your own copy (ISO, GCM, CISO, GCZ, RVZ, WIA or TGC), or a disc extracted with Dolphin. You can drop it on the window.
-5. **On Game, choose Install On…:**
+1. **Download Frontline Installer** from the [latest release](https://github.com/chocoguy/FrontlineRewritten/releases/latest), unzip it, and ***drag it to Applications Folder*** It's signed and notarized.
+2. Have you dragged the .app package to the ***Applications Folder?*** 
+3. **Install Xcode 27** from the App Store and open it once. Xcode builds the game; you won't need to use it.
+4. **Open Frontline Installer and follow Setup.** It checks what this Mac needs and fixes what it can: it downloads CMake, and installs iOS or tvOS support in Xcode if you want those.
+5. **Choose your disc:** a disc image of your own copy (ISO, GCM, CISO, GCZ, RVZ, WIA or TGC), or a disc extracted with Dolphin. You can drop it on the window.
+6. **On Game, choose Install On…:**
    - **This Mac:** **Frontline Rewritten.app** goes in your Applications folder, set up to find your disc.
    - **An iPhone or iPad, or an Apple TV:** pick the device. It has to be paired with Xcode, and a paid Apple Developer team signed in to Xcode (Xcode → Settings → Accounts). See [iPhone and iPad](#iphone-and-ipad-manualdev-install) and [Apple TV](#apple-tv-manualdev-install) for pairing.
 
    The first build downloads the source and takes about 15 minutes; later ones are quicker. **Activity** shows what it's doing.
 
-**Updates:** when a new version is released, **Updates** shows it with its notes. **Update All** rebuilds it once and reinstalls it everywhere you installed the game. A device that's off is finished later. The installer updates itself too (Frontline Installer → Check for Updates…).
+**Updates:** when a new version is released, **Updates** shows it with its notes. **Update All** rebuilds it once and reinstalls it everywhere you installed the game. A device that's off is finished later. When a release needs a new installer, it says so and links to it: download it and open it instead of the old one. Your disc, devices and build carry over.
 
 **Before an install expires:** iPhone, iPad and Apple TV installs stop opening when their profile expires, after up to a year. The Game screen shows when each one stops working; press **Reinstall** before then. Your saves are kept.
 
-Everything the installer downloads and builds stays in `~/Library/Application Support/Frontline Rewritten Installer`. It runs `tools/tvos/port`, which also works from the Terminal (below).
+Everything the installer downloads and builds (the source, the Xcode builds, CMake, logs) stays in one folder, `~/Library/Application Support/Frontline Rewritten Installer`, never in the app: **Setup → Storage** shows its size, frees the builds (several GB) or removes it all. It runs `tools/tvos/port`, which also works from the Terminal (below).
 
 Saves go to the memory card in slot A: `~/Library/Application Support/Frontline Rewritten/Memory Card A`, one `.gci` file per save (the format of Dolphin's GCI folders and GameCube save tools)
 
@@ -196,7 +197,7 @@ python3 tools/build_report.py
 
 Add `--sizes` to list the structs whose native layout differs from the GameCube's
 
-**Frontline Installer** (`apps/installer`) builds with the Xcode preset; local builds are signed ad hoc and never update themselves:
+**Frontline Installer** (`apps/installer`) builds with the Xcode preset; local builds are signed ad hoc, and build the releases of `port.json`'s major version:
 
 ```sh
 cmake --build --preset xcode --target FrontlineInstaller

@@ -43,8 +43,11 @@ final class AppModel: ObservableObject {
     /// What each install reports now (port installed), by install ID: its version, "Not installed", or
     /// "Not reachable".
     @Published var reported: [String: String] = [:]
-    /// A release needs this installer version or later (its port.json's minAppVersion).
-    @Published var needsInstaller: SemVer?
+    /// The alert saying a new installer is out (shown once per launch).
+    @Published var showNewInstaller = false
+    /// The workspace's size on disk, once measured.
+    @Published var storageBytes: Int64?
+    private var announcedInstaller: String?
 
     private let shell = Shell()
     private var log: FileHandle?
@@ -55,19 +58,34 @@ final class AppModel: ObservableObject {
 
     // MARK: What the screens ask
 
+    /// The release this installer was built for (N.0.0): it builds the releases of major version N.
     var installerVersion: SemVer {
-        SemVer(Bundle.main.object(forInfoDictionaryKey: "FrontlineVersion") as? String ?? "") ?? SemVer("0.0.1")!
+        SemVer(Bundle.main.object(forInfoDictionaryKey: "FrontlineInstallerVersion") as? String ?? "") ?? SemVer("0.0.1")!
     }
 
     /// Release candidates too (the hidden includePrereleases default, for testing them).
     var prereleases: Bool { UserDefaults.standard.bool(forKey: "includePrereleases") }
 
-    var installable: [Release] { Releases.installable(releases, prereleases: prereleases) }
+    /// The releases this installer can build: its own major version.
+    var installable: [Release] {
+        Releases.compatible(releases, prereleases: prereleases, installerMajor: installerVersion.major)
+    }
     var latest: Release? { installable.first }
 
-    /// A newer release than the one installed.
+    /// A release of a later major version: it needs a new installer, and game updates wait for it.
+    var newInstaller: Release? {
+        Releases.needingNewerInstaller(releases, prereleases: prereleases, installerMajor: installerVersion.major)
+    }
+
+    /// The release a new install gets: the one already installed elsewhere (so they all match), or the
+    /// latest when nothing is installed yet (not whatever an earlier, failed build left checked out).
+    var targetTag: String? {
+        state.installs.isEmpty ? latest?.tag ?? state.tag : state.tag ?? latest?.tag
+    }
+
+    /// A newer release than the one installed, and this installer can build it.
     var updateAvailable: Bool {
-        guard let latest = latest?.version, !state.installs.isEmpty else {
+        guard newInstaller == nil, let latest = latest?.version, !state.installs.isEmpty else {
             return false
         }
         return state.tag.flatMap(SemVer.init).map { latest > $0 } ?? true
@@ -76,14 +94,15 @@ final class AppModel: ObservableObject {
     var setupReady: Bool { !doctor.isEmpty && !doctor.contains { $0.status == .missing } }
     var setupIssues: Int { doctor.filter { $0.status == .missing }.count }
     var pending: [Install] { state.installs.filter(\.pending) }
-    var canRun: Bool { !activity.running && setupReady && !state.disc.isEmpty && (state.tag ?? latest?.tag) != nil }
+    var canRun: Bool { blocker == nil }
 
     /// Why nothing can be installed yet, if so.
     var blocker: String? {
         if activity.running { return "Something is already running." }
         if !setupReady { return "Finish Setup first." }
         if state.disc.isEmpty { return "Choose your disc first." }
-        if state.tag == nil && latest == nil { return releaseError ?? "No release found on GitHub yet." }
+        if state.installs.isEmpty, newInstaller != nil { return "Download the new installer first." }
+        if targetTag == nil { return releaseError ?? "No release found on GitHub yet." }
         return nil
     }
 
@@ -105,6 +124,7 @@ final class AppModel: ObservableObject {
         await checkSetup()
         await loadReleases()
         await checkInstalled()
+        await measureStorage()
     }
 
     func checkSetup() async {
@@ -120,6 +140,56 @@ final class AppModel: ObservableObject {
         } catch {
             releaseError = "Couldn't reach GitHub: \(error.localizedDescription)"
         }
+        if let newer = newInstaller, announcedInstaller != newer.tag {
+            announcedInstaller = newer.tag
+            showNewInstaller = true
+        }
+    }
+
+    /// The GitHub release page with the new installer (every release carries its major version's).
+    func openNewInstaller() {
+        let page = newInstaller?.page ?? "https://github.com/\(Releases.repository)/releases/latest"
+        if let url = URL(string: page) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: Storage
+
+    func measureStorage() async {
+        let workspace = workspace
+        storageBytes = await Task.detached { workspace.size() }.value
+    }
+
+    func showStorage() {
+        try? FileManager.default.createDirectory(at: workspace.root, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([workspace.root])
+    }
+
+    /// Removes the Xcode projects and builds (the bulk of it); the next install builds again.
+    func freeUpSpace() {
+        guard !activity.running else {
+            return
+        }
+        for url in workspace.rebuildable {
+            try? FileManager.default.removeItem(at: url)
+        }
+        Task { await measureStorage() }
+    }
+
+    /// Removes the whole folder: the source, the builds, the downloaded CMake, logs and what the
+    /// installer remembers. The game stays on this Mac and the devices.
+    func removeEverything() {
+        guard !activity.running else {
+            return
+        }
+        try? FileManager.default.removeItem(at: workspace.root)
+        var fresh = InstallerState()
+        fresh.migrated = true
+        state = fresh
+        reported = [:]
+        activity = Activity()
+        Task { await refresh() }
     }
 
     /// Asks each install what's there now (tools/tvos/port installed), so the list stays honest when
@@ -164,9 +234,9 @@ final class AppModel: ObservableObject {
 
     // MARK: Jobs
 
-    /// Installs the game on a new target, at the release already built (or the latest).
+    /// Installs the game on a new target, at the release installed elsewhere (or the latest).
     func add(_ platform: Platform, device: Device?) {
-        guard let tag = state.tag ?? latest?.tag else {
+        guard let tag = targetTag else {
             return
         }
         let install = Install(platform: platform, deviceId: device?.id, deviceName: device?.name ?? "This Mac")
@@ -177,7 +247,7 @@ final class AppModel: ObservableObject {
     }
 
     func reinstall(_ install: Install) {
-        guard let tag = state.tag ?? latest?.tag else {
+        guard let tag = targetTag else {
             return
         }
         run("Reinstalling on \(install.deviceName)") {
@@ -188,7 +258,7 @@ final class AppModel: ObservableObject {
 
     /// The latest release, everywhere the game is installed.
     func updateAll() {
-        guard let latest else {
+        guard updateAvailable, let latest else {
             return
         }
         install(latest, title: "Updating to \(latest.tag)")
@@ -196,6 +266,9 @@ final class AppModel: ObservableObject {
 
     /// `release` on every install: an update, or going back to an earlier version.
     func install(_ release: Release, title: String? = nil) {
+        guard newInstaller == nil else {
+            return
+        }
         let targets = state.installs
         run(title ?? "Installing \(release.tag)") {
             try await self.bringSource(to: release.tag)
@@ -336,6 +409,7 @@ final class AppModel: ObservableObject {
             activity.progress = nil
             try? log?.close()
             log = nil
+            await measureStorage()
             if activity.problem != nil || activity.finished != nil {
                 NSApp.requestUserAttention(.informationalRequest)
             }
@@ -418,10 +492,16 @@ final class AppModel: ObservableObject {
         return result
     }
 
-    /// Brings the source to `tag`: fetches it, checks the installer is new enough for it (its
-    /// port.json), then checks it and its submodule out. On a failure it goes back to the tag it was at.
+    /// Brings the source to `tag`: fetches it, then checks it and its submodule out. On a failure it
+    /// goes back to the tag it was at. Only this installer's major version: a later one needs a new installer.
     private func bringSource(to tag: String) async throws {
         let previous = state.tag
+        if let wanted = SemVer(tag), wanted.major != installerVersion.major {
+            throw Problem(message: "\(tag) needs a different Frontline Installer (this is \(installerVersion)).",
+                          fix: wanted.major > installerVersion.major
+                              ? "Download the new installer from the latest release on GitHub, and open it instead of this one."
+                              : "Choose a \(installerVersion.major).x version.")
+        }
         for (label, arguments) in Source.fetchCommands(workspace) {
             step(label)
             try await tool(Source.git, arguments) { line in
@@ -430,12 +510,6 @@ final class AppModel: ObservableObject {
                 }
             }
         }
-        if let minimum = await Source.minimumInstaller(for: tag, in: workspace), minimum > installerVersion {
-            needsInstaller = minimum
-            throw Problem(message: "\(tag) needs Frontline Installer \(minimum) or later (this is \(installerVersion)).",
-                          fix: "Choose Frontline Installer → Check for Updates…, then try again.")
-        }
-        needsInstaller = nil
         guard previous != tag || !FileManager.default.fileExists(atPath: workspace.port.path) else {
             return
         }

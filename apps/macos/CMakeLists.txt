@@ -15,7 +15,17 @@ add_executable(FrontlineMac MACOSX_BUNDLE
     Sources/Power.swift
     Sources/Renderer.swift
     Sources/Settings.swift
-    Sources/SetupView.swift)
+    Sources/SetupView.swift
+    AppIcon.icns)
+set_source_files_properties(AppIcon.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+# Assets.xcassets holds AccentColor (#8AA6EE), the app's accent. Only Xcode compiles asset catalogs;
+# other generators get the tint in code alone (Color.brand).
+if(CMAKE_GENERATOR STREQUAL "Xcode")
+    target_sources(FrontlineMac PRIVATE Assets.xcassets)
+    set_source_files_properties(Assets.xcassets PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    set_target_properties(FrontlineMac PROPERTIES
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME AccentColor)
+endif()
 
 set_target_properties(FrontlineMac PROPERTIES
     OUTPUT_NAME "Frontline Rewritten"
@@ -24,6 +34,7 @@ set_target_properties(FrontlineMac PROPERTIES
     MACOSX_BUNDLE_BUNDLE_NAME "Frontline Rewritten"
     MACOSX_BUNDLE_BUNDLE_VERSION "${FRONTLINE_BUILD_NUMBER}"
     MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    MACOSX_BUNDLE_ICON_FILE AppIcon
     XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "${FRONTLINE_BUNDLE_ID}"
     # Sign to run locally; nothing here is distributed as a binary (see ROADMAP gotcha 12).
     XCODE_ATTRIBUTE_CODE_SIGN_IDENTITY "-"
